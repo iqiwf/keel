@@ -1,0 +1,97 @@
+import fs from "node:fs";
+import path from "node:path";
+import { dataDir } from "./config";
+import type { Clip, Project, StoreData } from "./types";
+
+const EMPTY: StoreData = { projects: [], clips: [] };
+
+function file(): string {
+  return path.join(dataDir(), "store.json");
+}
+
+function read(): StoreData {
+  const target = file();
+  if (!fs.existsSync(target)) return structuredClone(EMPTY);
+  try {
+    const parsed = JSON.parse(fs.readFileSync(target, "utf8")) as StoreData;
+    if (!Array.isArray(parsed.projects) || !Array.isArray(parsed.clips)) {
+      return structuredClone(EMPTY);
+    }
+    return parsed;
+  } catch {
+    return structuredClone(EMPTY);
+  }
+}
+
+function write(data: StoreData): void {
+  const dir = dataDir();
+  fs.mkdirSync(dir, { recursive: true });
+  const target = file();
+  const tmp = `${target}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
+  fs.renameSync(tmp, target);
+}
+
+export function listProjects(): Project[] {
+  return read().projects.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+export function getProject(id: string): Project | null {
+  return read().projects.find((item) => item.id === id) ?? null;
+}
+
+export function saveProject(project: Project): Project {
+  const data = read();
+  const index = data.projects.findIndex((item) => item.id === project.id);
+  if (index >= 0) data.projects[index] = project;
+  else data.projects.unshift(project);
+  write(data);
+  return project;
+}
+
+export function updateProject(id: string, patch: Partial<Project>): Project | null {
+  const current = getProject(id);
+  if (!current) return null;
+  return saveProject({ ...current, ...patch, id: current.id });
+}
+
+export function clipsFor(projectId: string): Clip[] {
+  return read()
+    .clips.filter((clip) => clip.projectId === projectId)
+    .sort((a, b) => b.score - a.score);
+}
+
+export function getClip(id: string): Clip | null {
+  return read().clips.find((item) => item.id === id) ?? null;
+}
+
+export function saveClip(clip: Clip): Clip {
+  const data = read();
+  const index = data.clips.findIndex((item) => item.id === clip.id);
+  if (index >= 0) data.clips[index] = clip;
+  else data.clips.push(clip);
+  write(data);
+  return clip;
+}
+
+export function replaceClips(projectId: string, clips: Clip[]): void {
+  const data = read();
+  data.clips = data.clips.filter((clip) => clip.projectId !== projectId).concat(clips);
+  write(data);
+}
+
+export function mastersDir(): string {
+  const dir = path.join(dataDir(), "masters");
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+export function exportsDir(): string {
+  const dir = path.join(dataDir(), "exports");
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+export function masterPath(project: Project): string {
+  return path.join(mastersDir(), project.fileName);
+}
