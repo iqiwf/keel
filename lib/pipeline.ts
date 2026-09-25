@@ -3,19 +3,20 @@ import path from "node:path";
 import { getProvider } from "./ai";
 import { dataDir, whisperModel } from "./config";
 import { id } from "./ids";
-import { claim, release } from "./jobs";
+import { claim, forgetCancel, release, wasCancelled } from "./jobs";
 import { clipsFor, getClip, getProject, masterPath, replaceClips, saveClip, updateProject } from "./store";
 import { cuesFromWords } from "./captions";
 import type { Clip, Cue, Transcript } from "./types";
-import { extractAudio, probeDuration, renderClip, scanEnergy } from "./video/ffmpeg";
+import { extractAudio, probeMedia, renderClip, scanEnergy } from "./video/ffmpeg";
 import { planCrop } from "./video/reframe";
 import { alignWords, readTranscript, saveTranscript, transcriptMatches } from "./video/speech";
-import { detectTrack, readTrack, saveTrack, sourceFingerprint, trackMatches } from "./video/subjects";
+import { detectTrack, readTrack, saveTrack, sourceFingerprint, TrackingStopped, trackMatches } from "./video/subjects";
 import { selectWindows, type TimeWindow } from "./video/windows";
 import { downloadYoutube } from "./video/youtube";
 
 export function beginAnalyze(projectId: string, targetSeconds: number): boolean {
   if (!claim(projectId)) return false;
+  forgetCancel(projectId);
   void analyzeProject(projectId, targetSeconds).finally(() => release(projectId));
   return true;
 }
@@ -47,8 +48,15 @@ export async function ingestUpload(projectId: string): Promise<void> {
   const project = getProject(projectId);
   if (!project) return;
   try {
-    const duration = await probeDuration(masterPath(project));
-    updateProject(projectId, { duration, status: "draft", stage: "Ready to mark", progress: 100, error: null });
+    const media = await probeMedia(masterPath(project));
+    updateProject(projectId, {
+      duration: media.duration,
+      status: "draft",
+      stage: "Ready to mark",
+      progress: 100,
+      error: null,
+      warning: media.hasAudio ? null : "No soundtrack was found, so the cuts will have no captions.",
+    });
   } catch (error) { fail(projectId, error); }
 }
 
@@ -59,8 +67,16 @@ export async function ingestUrl(projectId: string, pageUrl: string): Promise<voi
     updateProject(projectId, { stage: "Fetching the source", progress: 15, status: "analyzing" });
     const file = path.join(path.dirname(masterPath(project)), project.fileName);
     const title = await downloadYoutube(pageUrl, file);
-    const duration = await probeDuration(file);
-    updateProject(projectId, { title: title || project.title, duration, status: "draft", stage: "Ready to mark", progress: 100, error: null });
+    const media = await probeMedia(file);
+    updateProject(projectId, {
+      title: title || project.title,
+      duration: media.duration,
+      status: "draft",
+      stage: "Ready to mark",
+      progress: 100,
+      error: null,
+      warning: media.hasAudio ? null : "No soundtrack was found, so the cuts will have no captions.",
+    });
   } catch (error) { fail(projectId, error); }
 }
 
@@ -69,18 +85,25 @@ export async function analyzeProject(projectId: string, targetSeconds: number): 
   if (!project || project.duration < 3) return;
   const audioPath = path.join(dataDir(), "tmp", `${projectId}.mp3`);
   try {
-    updateProject(projectId, { status: "analyzing", stage: "Scanning the soundtrack", progress: 12, error: null, warning: null });
+    updateProject(projectId, { status: "analyzing", stage: "Checking the picture", progress: 8, error: null, warning: null });
     const provider = getProvider();
     const source = masterPath(project);
+    const media = await probeMedia(source);
+    if (Math.abs(media.duration - project.duration) > 1) updateProject(projectId, { duration: media.duration });
+    const duration = media.duration;
+    if (stopped(projectId)) return;
     const fingerprint = sourceFingerprint(source);
-    const long = provider.name === "local" && project.duration >= 8 * 60;
-    const windows = long ? selectWindows(await scanEnergy(source), project.duration, targetSeconds) : undefined;
-    updateProject(projectId, { stage: "Reading the soundtrack", progress: 28 });
+    const long = provider.name === "local" && duration >= 8 * 60 && media.hasAudio;
+    updateProject(projectId, { stage: long ? "Scanning the soundtrack" : "Reading the soundtrack", progress: long ? 16 : 28 });
+    const windows = long ? selectWindows(await scanEnergy(source), duration, targetSeconds) : undefined;
+    if (stopped(projectId)) return;
+    updateProject(projectId, { stage: "Reading the soundtrack", progress: windows ? 34 : 40 });
     const transcript = await transcriptFor(projectId, provider.name, source, audioPath, fingerprint, windows, {
       title: project.title,
-      duration: project.duration,
+      duration,
       targetSeconds,
     });
+    if (stopped(projectId)) return;
     if (!transcript.words.length && provider.name !== "mock") {
       updateProject(projectId, { warning: "No speech was detected, so these cuts have no captions. You can type a line before printing." });
     }
@@ -88,21 +111,34 @@ export async function analyzeProject(projectId: string, targetSeconds: number): 
     let trackWarning: string | null = null;
     try {
       if (!trackMatches(readTrack(projectId), fingerprint, windows)) {
-        saveTrack(projectId, { ...await detectTrack(source, windows), fingerprint });
+        const track = await detectTrack(source, windows, (done, total) => {
+          updateProject(projectId, {
+            stage: total > 1 ? `Finding the speaker (${done}/${total})` : "Finding the speaker",
+            progress: 58 + Math.round((done / Math.max(1, total)) * 16),
+          });
+        }, () => wasCancelled(projectId));
+        if (stopped(projectId)) return;
+        saveTrack(projectId, { ...track, fingerprint });
       }
     } catch (error) {
+      if (error instanceof TrackingStopped || wasCancelled(projectId)) {
+        stopped(projectId);
+        return;
+      }
       trackWarning = error instanceof Error ? error.message : "Speaker tracking failed.";
       console.error("speaker tracking failed", trackWarning);
     }
-    updateProject(projectId, { stage: "Choosing the cuts", progress: 78 });
+    if (stopped(projectId)) return;
+    updateProject(projectId, { stage: "Choosing the cuts", progress: 82 });
     for (const previous of clipsFor(projectId)) {
       if (previous.exportName) fs.rmSync(path.join(dataDir(), "exports", previous.exportName), { force: true });
     }
-    const drafts = await provider.findHighlights({ title: project.title, duration: project.duration, targetSeconds, audioPath }, transcript);
+    const drafts = await provider.findHighlights({ title: project.title, duration, targetSeconds, audioPath }, transcript);
+    if (stopped(projectId)) return;
     const now = new Date().toISOString();
     const clips: Clip[] = drafts.map((draft, index) => {
-      const start = Math.max(0, Math.min(project.duration - 3, draft.start));
-      const end = Math.min(project.duration, Math.max(start + 3, draft.end));
+      const start = Math.max(0, Math.min(duration - 3, draft.start));
+      const end = Math.min(duration, Math.max(start + 3, draft.end));
       const cues = cuesFromWords(transcript.words, start, end);
       return {
         id: id("clp"), projectId, title: draft.title, hook: draft.hook, reason: draft.reason, score: draft.score,
@@ -152,9 +188,15 @@ async function transcriptFor(
     audioPath: providerName === "openai" ? audioPath : providerName === "local" ? source : undefined,
     windows,
   });
-  const aligned = { ...transcript, words: alignWords(transcript.words, windows) };
+  const aligned = { ...transcript, words: alignWords(transcript.words, windows, "absolute") };
   if (providerName !== "mock") {
-    saveTranscript(projectId, { fingerprint, model, windows: windows ?? [], transcript: aligned });
+    saveTranscript(projectId, {
+      fingerprint,
+      model,
+      scope: windows?.length ? "windows" : "full",
+      windows: windows ?? [],
+      transcript: aligned,
+    });
   }
   return aligned;
 }
@@ -207,6 +249,13 @@ export function projectView(projectId: string) {
   const file = masterPath(project);
   const live = fs.existsSync(file) ? sourceFingerprint(file) : "";
   return { project, clips: clipsFor(projectId), frame: frame?.fingerprint === live ? frame : null };
+}
+
+function stopped(projectId: string): boolean {
+  if (!wasCancelled(projectId)) return false;
+  forgetCancel(projectId);
+  updateProject(projectId, { status: "draft", stage: "Ready to mark", progress: 100, error: null, warning: "Marking was stopped." });
+  return true;
 }
 
 function fail(projectId: string, error: unknown): void {

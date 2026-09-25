@@ -31,15 +31,30 @@ export async function run(command: string, args: string[], timeout = 180_000, cw
 }
 
 export async function probeDuration(file: string): Promise<number> {
+  return (await probeMedia(file)).duration;
+}
+
+export async function probeMedia(file: string): Promise<{ duration: number; hasVideo: boolean; hasAudio: boolean }> {
   const output = await run("ffprobe", [
     "-v", "error",
-    "-show_entries", "format=duration",
-    "-of", "default=noprint_wrappers=1:nokey=1",
+    "-show_entries", "format=duration:stream=codec_type",
+    "-of", "json",
     file,
   ]);
-  const duration = Number(output.trim().split(/\s+/)[0]);
+  const start = output.indexOf("{");
+  const end = output.lastIndexOf("}");
+  if (start < 0 || end < start) throw new Error("Could not read the video.");
+  const parsed = JSON.parse(output.slice(start, end + 1)) as {
+    format?: { duration?: string };
+    streams?: { codec_type?: string }[];
+  };
+  const duration = Number(parsed.format?.duration);
   if (!Number.isFinite(duration) || duration <= 0.4) throw new Error("Could not read the video length.");
-  return duration;
+  const streams = parsed.streams ?? [];
+  const hasVideo = streams.some((stream) => stream.codec_type === "video");
+  const hasAudio = streams.some((stream) => stream.codec_type === "audio");
+  if (!hasVideo) throw new Error("That file has no picture.");
+  return { duration, hasVideo, hasAudio };
 }
 
 export function frameSize(aspect: Aspect): { width: number; height: number } {

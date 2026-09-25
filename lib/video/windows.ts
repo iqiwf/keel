@@ -40,8 +40,49 @@ export function selectWindows(bins: EnergyBin[], duration: number, targetSeconds
     if (!best) continue;
     chosen.push({ start: Math.max(0, best.start - 1), end: Math.min(safeDuration, best.end + 2) });
   }
+  const covered = () => chosen.reduce((sum, window) => sum + (window.end - window.start), 0);
+  const extras = speechRuns(bins)
+    .filter((run) => run.end - run.start >= 3 && !overlaps(chosen, run.start, run.end))
+    .sort((a, b) => b.peak - a.peak || b.loud - a.loud);
+  for (const run of extras) {
+    if (chosen.length >= slots + 3 || covered() >= 6 * 60) break;
+    const start = Math.max(0, run.start - 1);
+    const end = Math.min(safeDuration, Math.max(run.end + 1, start + Math.min(length, 24)));
+    if (covered() + (end - start) > 6 * 60 || overlaps(chosen, start, end)) continue;
+    chosen.push({ start, end });
+  }
   if (!chosen.length) return spread(safeDuration, length, Math.min(slots, 3));
   return chosen.sort((a, b) => a.start - b.start);
+}
+
+function overlaps(windows: TimeWindow[], start: number, end: number): boolean {
+  return windows.some((window) => Math.min(window.end, end) - Math.max(window.start, start) > 2);
+}
+
+/** Group audible seconds so a second distinct passage in one band is not dropped. */
+export function speechRuns(bins: EnergyBin[]): { start: number; end: number; peak: number; loud: number }[] {
+  const ordered = [...bins].sort((a, b) => a.t - b.t);
+  const runs: { start: number; end: number; peak: number; loud: number }[] = [];
+  let run: { start: number; end: number; peak: number; loud: number } | null = null;
+  for (const bin of ordered) {
+    if (bin.rms <= AUDIBLE) {
+      if (run && bin.t - run.end > 1.5) {
+        runs.push(run);
+        run = null;
+      }
+      continue;
+    }
+    if (!run || bin.t - run.end > 1.5) {
+      if (run) runs.push(run);
+      run = { start: bin.t, end: bin.t + 1, peak: bin.rms, loud: bin.rms > LOUD ? 1 : 0 };
+    } else {
+      run.end = bin.t + 1;
+      run.peak = Math.max(run.peak, bin.rms);
+      if (bin.rms > LOUD) run.loud += 1;
+    }
+  }
+  if (run) runs.push(run);
+  return runs;
 }
 
 export function sameWindows(saved: TimeWindow[] | undefined, wanted: TimeWindow[]): boolean {

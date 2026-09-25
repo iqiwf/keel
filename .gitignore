@@ -7,3 +7,5 @@ out
 coverage
 *.tsbuildinfo
 npm-debug.log*
+__pycache__/
+*.pyc

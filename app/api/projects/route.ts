@@ -2,6 +2,7 @@ import path from "node:path";
 import { maxUploadBytes } from "@/lib/config";
 import { id } from "@/lib/ids";
 import { json, fail } from "@/lib/http";
+import { atCapacity } from "@/lib/jobs";
 import { ingestUpload, ingestUrl } from "@/lib/pipeline";
 import { listProjects, mastersDir, saveProject, updateProject, writeBounded } from "@/lib/store";
 import type { Project } from "@/lib/types";
@@ -21,6 +22,7 @@ export async function GET(): Promise<Response> {
 
 export async function POST(request: Request): Promise<Response> {
   try {
+    if (atCapacity()) return fail(new Error("Keel is already working on other sources. Try again in a moment."), 429);
     const type = request.headers.get("content-type") || "";
     if (type.includes("application/json")) return fromUrl(await request.json());
     if (type.includes("multipart/form-data")) return fromUpload(await request.formData());

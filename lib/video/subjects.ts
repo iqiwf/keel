@@ -7,6 +7,12 @@ import { faceStats, followSubject } from "./reframe";
 import { run } from "./ffmpeg";
 import { sameWindows, type TimeWindow } from "./windows";
 
+export class TrackingStopped extends Error {
+  constructor() {
+    super("Speaker tracking was stopped.");
+  }
+}
+
 export function trackPath(projectId: string): string {
   return path.join(dataDir(), "analysis", `${projectId}.json`);
 }
@@ -30,9 +36,11 @@ export function readTrack(projectId: string): SubjectTrack | null {
 
 export function trackMatches(track: SubjectTrack | null, fingerprint: string, windows?: TimeWindow[]): boolean {
   if (!track?.fingerprint || track.fingerprint !== fingerprint) return false;
-  if (!windows?.length) return !track.coverage?.length;
-  if (!track.coverage?.length) return true;
-  return sameWindows(track.coverage, windows);
+  const wanted = windows?.filter((window) => window.end > window.start) ?? [];
+  const saved = track.coverage?.filter((window) => window.end > window.start) ?? [];
+  if (!wanted.length) return saved.length === 0;
+  if (!saved.length) return false;
+  return sameWindows(saved, wanted);
 }
 
 export function saveTrack(projectId: string, track: SubjectTrack): void {
@@ -43,15 +51,29 @@ export function saveTrack(projectId: string, track: SubjectTrack): void {
   fs.renameSync(tmp, file);
 }
 
-export async function detectTrack(source: string, windows?: { start: number; end: number }[]): Promise<SubjectTrack> {
+export async function detectTrack(
+  source: string,
+  windows?: { start: number; end: number }[],
+  onProgress?: (done: number, total: number) => void,
+  shouldStop?: () => boolean,
+): Promise<SubjectTrack> {
   const script = path.join(process.cwd(), "scripts", "detect_subjects.py");
   const ranges = windows?.length ? windows : [{ start: 0, end: 0 }];
-  const batches = await Promise.all(ranges.map(async (window) => {
+  const batches = [];
+  for (const [index, window] of ranges.entries()) {
+    if (shouldStop?.()) throw new TrackingStopped();
     const args = [script, source];
     if (window.end > window.start) args.push(String(window.start), String(window.end));
-    const output = await run("python", args, 12 * 60_000);
-    return parseSamples(output);
-  }));
+    let output = "";
+    try {
+      output = await run("python", args, 12 * 60_000);
+    } catch (error) {
+      output = await run("python", args, 12 * 60_000);
+      if (!output.trim()) throw error;
+    }
+    batches.push(parseSamples(output));
+    onProgress?.(index + 1, ranges.length);
+  }
   const width = batches.find((batch) => batch.width > 1)?.width ?? 0;
   const height = batches.find((batch) => batch.height > 1)?.height ?? 0;
   const samples = batches.flatMap((batch) => batch.samples).sort((a, b) => a.t - b.t);

@@ -105,6 +105,13 @@ export function followSubject(samples: DetectSample[], srcW: number, srcH: numbe
 
   const ordered = [...samples].sort((a, b) => a.t - b.t);
   for (const sample of ordered) {
+    const previousTime = points.length ? points[points.length - 1].t : sample.t;
+    const jumped = points.length > 0 && sample.t - previousTime > 2.5;
+    if (jumped) {
+      tracks.splice(0, tracks.length);
+      activeId = 0;
+      lastFace = null;
+    }
     const faces = sample.faces.map(centerOf);
     const matchDistance = Math.max(48, srcW * 0.18);
     const used = new Set<number>();
@@ -158,7 +165,7 @@ export function followSubject(samples: DetectSample[], srcW: number, srcH: numbe
     }
 
     const dt = points.length ? Math.max(0.05, sample.t - cursor.t) : 0;
-    cursor = points.length
+    cursor = points.length && !jumped
       ? { t: sample.t, x: approach(cursor.x, target.x, srcW, dt), y: approach(cursor.y, target.y, srcH, dt) }
       : { t: sample.t, x: target.x, y: target.y };
     points.push({ t: round(sample.t), x: round(cursor.x), y: round(cursor.y) });

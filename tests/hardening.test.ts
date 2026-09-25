@@ -6,14 +6,16 @@ import test from "node:test";
 import { clipPatchSchema, parseVideoUrl } from "../lib/validation";
 import { cuesFromWords } from "../lib/captions";
 import { highlightsFromSpeech } from "../lib/highlights";
-import { claim, release } from "../lib/jobs";
+import { claim, release, requestCancel, wasCancelled, forgetCancel } from "../lib/jobs";
 import { cutsMatch } from "../lib/pipeline";
-import { rmsOfInt16, scanEnergy } from "../lib/video/ffmpeg";
+import { probeMedia, rmsOfInt16, scanEnergy } from "../lib/video/ffmpeg";
 import { parseEnergy, selectWindows } from "../lib/video/windows";
 import { cropWindow, followSubject, planCrop, previewBox } from "../lib/video/reframe";
 import { alignWords, readTranscript, saveTranscript, transcriptMatches } from "../lib/video/speech";
 import { readTrack, saveTrack, trackMatches } from "../lib/video/subjects";
 import { writeBounded } from "../lib/store";
+
+process.env.KEEL_MAX_JOBS = "8";
 
 test("clip patch rejects non-finite numbers and invalid cue timing", () => {
   assert.throws(() => clipPatchSchema.parse({ start: Number.NaN }));
@@ -123,7 +125,7 @@ test("clip-relative whisper words are shifted onto the source windows", () => {
   const shifted = alignWords([
     { text: "first", start: 0.4, end: 0.8 },
     { text: "later", start: 30.2, end: 30.6 },
-  ], windows);
+  ], windows, "relative");
   assert.ok(Math.abs(shifted[0].start - 100.4) < 0.01);
   assert.ok(Math.abs(shifted[1].start - 500.2) < 0.01);
   const absolute = alignWords([
@@ -151,6 +153,25 @@ test("a quiet but audible band is still selected, and silence is not", () => {
   assert.ok(!windows.some((window) => window.start <= 20 && window.end >= 21 && window.end < 400));
   const covered = windows.reduce((sum, window) => sum + (window.end - window.start), 0);
   assert.ok(covered < 8 * 60);
+});
+
+test("a second distinct passage in the same stretch is still covered", () => {
+  const bins = [
+    ...[1600, 1601, 1602, 1603].map((t) => ({ t, rms: -18 })),
+    ...[1850, 1851, 1852, 1853].map((t) => ({ t, rms: -20 })),
+  ];
+  const windows = selectWindows(bins, 50 * 60, 30);
+  assert.ok(windows.some((window) => window.start <= 1600 && window.end >= 1603), JSON.stringify(windows));
+  assert.ok(windows.some((window) => window.start <= 1850 && window.end >= 1853), JSON.stringify(windows));
+});
+
+test("a new shot after a gap is framed immediately instead of panning across the cut", () => {
+  const points = followSubject([
+    { t: 0, faces: [{ x: 40, y: 80, w: 80, h: 90 }], motion: null },
+    { t: 0.4, faces: [{ x: 48, y: 80, w: 80, h: 90 }], motion: null },
+    { t: 40, faces: [{ x: 800, y: 100, w: 90, h: 100 }], motion: null },
+  ], 1280, 720);
+  assert.ok(points[2].x > 700, `held the old shot at ${points[2].x}`);
 });
 
 test("a printed cut is stale when only the cues or caption style changed", () => {
@@ -228,6 +249,23 @@ test("an upload larger than the cap is not kept", async () => {
   fs.rmSync(root, { recursive: true, force: true });
 });
 
+test("stopping a mark is remembered until the job notices", () => {
+  requestCancel("prj_stop");
+  assert.equal(wasCancelled("prj_stop"), true);
+  forgetCancel("prj_stop");
+  assert.equal(wasCancelled("prj_stop"), false);
+});
+
+test("a file with no picture is refused before any cut is made", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "keel-probe-"));
+  const source = path.join(root, "tone.wav");
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  await promisify(execFile)("ffmpeg", ["-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=1", source]);
+  await assert.rejects(() => probeMedia(source), /no picture/);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
 test("a second job for the same source is refused until the first releases", () => {
   assert.equal(claim("prj_lock_a"), true);
   assert.equal(claim("prj_lock_a"), false);
@@ -255,14 +293,33 @@ test("track and transcript caches ignore a changed source and a corrupt file", a
     assert.equal(trackMatches(readTrack("prj_cache"), "10:1", [{ start: 1, end: 4 }]), true);
     assert.equal(trackMatches(readTrack("prj_cache"), "10:2", [{ start: 1, end: 4 }]), false);
     assert.equal(trackMatches(readTrack("prj_cache"), "10:1"), false);
+    assert.equal(trackMatches({ ...track, coverage: undefined }, "10:1", [{ start: 1, end: 4 }]), false);
     fs.writeFileSync(path.join(root, "analysis", "prj_cache.json"), "{not json");
     assert.equal(readTrack("prj_cache"), null);
     const transcript = { language: "en", text: "hello", words: [{ text: "hello", start: 1, end: 1.4 }] };
-    saveTranscript("prj_cache", { fingerprint: "10:1", model: "local:small", windows: [], transcript });
+    saveTranscript("prj_cache", { fingerprint: "10:1", model: "local:small", scope: "full", windows: [], transcript });
     const cached = readTranscript("prj_cache");
     assert.equal(transcriptMatches(cached, "10:1", "local:small"), true);
-    assert.equal(transcriptMatches(cached, "10:1", "local:small", [{ start: 2, end: 6 }]), true);
+    assert.equal(transcriptMatches(cached, "10:1", "local:small", [{ start: 2, end: 6 }]), false);
     assert.equal(transcriptMatches(cached, "99:1", "local:small"), false);
+    saveTranscript("prj_cache", {
+      fingerprint: "10:1",
+      model: "local:small",
+      scope: "windows",
+      windows: [{ start: 2, end: 6 }],
+      transcript,
+    });
+    const windowed = readTranscript("prj_cache");
+    assert.equal(transcriptMatches(windowed, "10:1", "local:small", [{ start: 2, end: 6 }]), true);
+    assert.equal(transcriptMatches(windowed, "10:1", "local:small"), false);
+    saveTranscript("prj_cache", {
+      fingerprint: "10:1",
+      model: "local:small",
+      scope: "windows",
+      windows: [{ start: 2, end: 6 }],
+      transcript: { ...transcript, words: [{ text: "outside", start: 90, end: 91 }] },
+    });
+    assert.equal(transcriptMatches(readTranscript("prj_cache"), "10:1", "local:small", [{ start: 2, end: 6 }]), false);
     assert.equal(fs.readdirSync(path.join(root, "analysis")).some((name) => name.endsWith(".tmp")), false);
     const { saveProject } = await import("../lib/store");
     saveProject({

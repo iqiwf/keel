@@ -120,6 +120,12 @@ export function Studio() {
     await load(body.project.id);
   }
 
+  async function stopMark() {
+    if (!view) return;
+    await fetch(`/api/projects/${view.project.id}/cancel`, { method: "POST" });
+    void load(view.project.id);
+  }
+
   async function mark() {
     if (!view) return;
     setError(null);
@@ -274,6 +280,11 @@ export function Studio() {
             >
               Mark cuts
             </button>
+            {view?.project.status === "analyzing" && view.project.duration > 0 ? (
+              <button className="btn ghost" type="button" onClick={() => void stopMark()}>
+                Stop
+              </button>
+            ) : null}
           </div>
           {error ? <p className="warn" role="alert">{error}</p> : null}
           {busy ? <p className="note">{busy}</p> : null}

@@ -6,9 +6,12 @@ import type { Transcript, TranscriptWord } from "../types";
 import { run } from "./ffmpeg";
 import { sameWindows, type TimeWindow } from "./windows";
 
+export type TranscriptScope = "full" | "windows";
+
 export interface TranscriptCache {
   fingerprint: string;
   model: string;
+  scope: TranscriptScope;
   windows: TimeWindow[];
   transcript: Transcript;
 }
@@ -19,28 +22,27 @@ export async function transcribeFile(audioPath: string, windows?: TimeWindow[]):
   const output = await run("python", [script, audioPath, whisperModel(), clips], 20 * 60_000);
   const line = output.split(/\r?\n/).map((item) => item.trim()).filter((item) => item.startsWith("{")).pop();
   if (!line) throw new Error("Transcription returned nothing. Check that faster-whisper can read the soundtrack.");
-  const parsed = JSON.parse(line) as Transcript;
+  const parsed = JSON.parse(line) as Transcript & { timeline?: string };
+  const timeline = parsed.timeline === "relative" ? "relative" : "absolute";
   return {
     language: parsed.language || "und",
     text: parsed.text || "",
-    words: alignWords(Array.isArray(parsed.words) ? parsed.words : [], windows),
+    words: alignWords(Array.isArray(parsed.words) ? parsed.words : [], windows, timeline),
   };
 }
 
 /**
- * faster-whisper seek offsets are absolute. If a build instead restarts each
- * clip at zero, shift those local times onto the source windows.
- * Words that already overlap a window are left alone.
+ * Shift only when the transcriber says the times restart at zero for each clip.
+ * Absolute times are never guessed back onto a window.
  */
-export function alignWords(words: TranscriptWord[], windows?: TimeWindow[]): TranscriptWord[] {
+export function alignWords(
+  words: TranscriptWord[],
+  windows?: TimeWindow[],
+  timeline: "absolute" | "relative" = "absolute",
+): TranscriptWord[] {
   const ordered = [...words].sort((a, b) => a.start - b.start);
   const spans = (windows ?? []).filter((window) => window.end > window.start).sort((a, b) => a.start - b.start);
-  if (!ordered.length || !spans.length) return ordered;
-  const overlaps = ordered.some((word) => spans.some((window) => word.end > window.start - 0.3 && word.start < window.end + 0.3));
-  if (overlaps) return ordered;
-  const covered = spans.reduce((sum, window) => sum + (window.end - window.start), 0);
-  const span = ordered[ordered.length - 1].end - ordered[0].start;
-  if (span > covered + 1 || ordered[0].start > 1.25) return ordered;
+  if (timeline !== "relative" || !ordered.length || !spans.length) return ordered;
   let index = 0;
   let origin = 0;
   return ordered.map((word) => {
@@ -72,19 +74,28 @@ export function readTranscript(projectId: string): TranscriptCache | null {
   if (!fs.existsSync(file)) return null;
   try {
     const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as TranscriptCache;
-    if (!parsed.fingerprint || !parsed.model || !parsed.transcript || !Array.isArray(parsed.transcript.words)) return null;
+    if (!parsed.fingerprint || !parsed.model || (parsed.scope !== "full" && parsed.scope !== "windows")) return null;
+    if (!parsed.transcript || !Array.isArray(parsed.transcript.words) || !Array.isArray(parsed.windows)) return null;
     return parsed;
   } catch {
     return null;
   }
 }
 
+function wordsFitWindows(cache: TranscriptCache): boolean {
+  if (cache.scope !== "windows") return cache.windows.length === 0;
+  if (!cache.windows.length) return false;
+  return cache.transcript.words.every((word) => cache.windows.some((window) => (
+    word.start >= window.start - 1 && word.end <= window.end + 1
+  )));
+}
+
+/** A full transcript is never a substitute for a windowed one, or the reverse. */
 export function transcriptMatches(cached: TranscriptCache | null, fingerprint: string, model: string, windows?: TimeWindow[]): boolean {
-  if (!cached || cached.fingerprint !== fingerprint || cached.model !== model) return false;
+  if (!cached || cached.fingerprint !== fingerprint || cached.model !== model || !wordsFitWindows(cached)) return false;
   const wanted = windows ?? [];
-  if (!wanted.length) return cached.windows.length === 0;
-  if (!cached.windows.length) return true;
-  return sameWindows(cached.windows, wanted);
+  if (!wanted.length) return cached.scope === "full";
+  return cached.scope === "windows" && sameWindows(cached.windows, wanted);
 }
 
 export function saveTranscript(projectId: string, cache: TranscriptCache): void {
