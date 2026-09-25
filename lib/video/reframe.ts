@@ -130,7 +130,7 @@ export function followSubject(samples: DetectSample[], srcW: number, srcH: numbe
     }
 
     for (let index = tracks.length - 1; index >= 0; index -= 1) {
-      if (!used.has(tracks[index].id) && sample.t - tracks[index].seen > 0.8) tracks.splice(index, 1);
+      if (!used.has(tracks[index].id) && sample.t - tracks[index].seen > 1.6) tracks.splice(index, 1);
     }
     if (!tracks.some((track) => track.id === activeId)) activeId = 0;
 
@@ -147,7 +147,7 @@ export function followSubject(samples: DetectSample[], srcW: number, srcH: numbe
       const chosen = tracks.find((track) => track.id === activeId) ?? active;
       target = { x: chosen.cx, y: chosen.cy };
       lastFace = { t: sample.t, x: chosen.cx, y: chosen.cy };
-    } else if (lastFace && sample.t - lastFace.t < 0.8) {
+    } else if (lastFace && sample.t - lastFace.t < 1.6) {
       target = { x: lastFace.x, y: lastFace.y };
     } else if (sample.motion) {
       target = sample.motion;

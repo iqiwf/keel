@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { clipPatchSchema, parseVideoUrl } from "../lib/validation";
 import { cuesFromWords } from "../lib/captions";
-import { cropWindow, planCrop } from "../lib/video/reframe";
+import { highlightsFromSpeech } from "../lib/highlights";
+import { cropWindow, followSubject, planCrop } from "../lib/video/reframe";
 
 test("clip patch rejects non-finite numbers and invalid cue timing", () => {
   assert.throws(() => clipPatchSchema.parse({ start: Number.NaN }));
@@ -37,6 +38,26 @@ test("reframe crop dimensions remain valid for every supported aspect", () => {
     assert.equal(window.width % 2, 0);
     assert.equal(window.height % 2, 0);
   }
+});
+
+test("highlights prefer a clean opening over a long sparse passage", () => {
+  const words = [
+    ...["Wait", "for", "this."].map((text, index) => ({ text, start: 1 + index * 0.4, end: 1.3 + index * 0.4 })),
+    ...Array.from({ length: 12 }, (_, index) => ({ text: "um", start: 20 + index * 2.2, end: 20.3 + index * 2.2 })),
+  ];
+  const [best] = highlightsFromSpeech(50, 15, { language: "en", text: words.map((word) => word.text).join(" "), words });
+  assert.ok(best.start < 8, `picked the sparse passage at ${best.start}`);
+  assert.ok(best.end - best.start >= 3);
+});
+
+test("a lost face holds its last position instead of jumping to distant motion", () => {
+  const samples = [
+    { t: 0, faces: [{ x: 80, y: 100, w: 80, h: 90 }], motion: null },
+    { t: 0.5, faces: [], motion: { x: 900, y: 400 } },
+    { t: 1.2, faces: [], motion: { x: 920, y: 420 } },
+  ];
+  const points = followSubject(samples, 1280, 720);
+  assert.ok(points[2].x < 300, `jumped to ${points[2].x}`);
 });
 
 test("reframe plan stays on the source bounds for a moving subject", () => {
