@@ -13,8 +13,8 @@ export async function POST(
     const { id } = await context.params;
     const view = projectView(id);
     if (!view) return fail(new Error("That source is gone."), 404);
-    if (view.project.duration <= 0 || view.project.status === "analyzing") {
-      return fail(new Error("Wait until the source has finished loading."));
+    if (view.project.duration < 3 || view.project.status === "analyzing") {
+      return fail(new Error("The source must be at least 3 seconds and fully loaded before marking cuts."));
     }
     const body = (await request.json()) as { targetSeconds?: number };
     const target = durationSchema.parse(body.targetSeconds);
