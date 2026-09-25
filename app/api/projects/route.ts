@@ -1,10 +1,9 @@
-import fs from "node:fs";
 import path from "node:path";
 import { maxUploadBytes } from "@/lib/config";
 import { id } from "@/lib/ids";
 import { json, fail } from "@/lib/http";
 import { ingestUpload, ingestUrl } from "@/lib/pipeline";
-import { listProjects, mastersDir, saveProject } from "@/lib/store";
+import { listProjects, mastersDir, saveProject, updateProject, writeBounded } from "@/lib/store";
 import type { Project } from "@/lib/types";
 import { assertVideoFile, parseVideoUrl, safeBaseName } from "@/lib/validation";
 
@@ -44,7 +43,13 @@ async function fromUpload(form: FormData): Promise<Response> {
   const ext = assertVideoFile(file.name, file.type, file.size, maxUploadBytes());
   const project = createProject("upload", safeBaseName(file.name), ext, "Reading the file");
   const target = path.join(mastersDir(), project.fileName);
-  fs.writeFileSync(target, Buffer.from(await file.arrayBuffer()));
+  try {
+    await writeBounded(file, target, maxUploadBytes());
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "The file was refused.";
+    updateProject(project.id, { status: "failed", error: message, stage: "Stopped", progress: 100 });
+    throw error;
+  }
   void ingestUpload(project.id);
   return json({ project }, 202);
 }

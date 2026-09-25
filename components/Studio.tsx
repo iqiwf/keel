@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Aspect, CaptionStyle, Clip, Cue, Project } from "@/lib/types";
-import { planCrop, type SubjectTrack } from "@/lib/video/reframe";
+import { planCrop, previewBox, type SubjectTrack } from "@/lib/video/reframe";
 
 type View = { project: Project; clips: Clip[]; frame?: SubjectTrack | null };
 
@@ -71,15 +71,18 @@ export function Studio() {
   }, [view, load, refreshList]);
 
   useEffect(() => {
+    if (!clip) return;
+    const at = clip.exportName ? 0 : clip.start;
+    setPlayhead(at);
     const node = videoRef.current;
-    if (!node || !clip || view?.project.status !== "ready") return;
-    if (clip.exportName) return;
+    if (!node || clip.exportName || view?.project.status !== "ready") return;
     const seek = () => {
-      node.currentTime = clip.start;
+      if (Math.abs(node.currentTime - clip.start) > 0.05) node.currentTime = clip.start;
     };
     if (node.readyState >= 1) seek();
-    else node.addEventListener("loadedmetadata", seek, { once: true });
-  }, [clip, view?.project.status]);
+    else node.addEventListener("loadedmetadata", seek);
+    return () => node.removeEventListener("loadedmetadata", seek);
+  }, [clip?.id, clip?.start, clip?.exportName, view?.project.status]);
 
   async function sendFile(file: File) {
     setError(null);
@@ -184,6 +187,14 @@ export function Studio() {
   const trackedKey = tracked?.keys.reduce((chosen, key) => (
     key.t <= Math.max(0, (playhead || clip!.start) - (clip?.start ?? 0)) ? key : chosen
   ), tracked.keys[0]);
+  const framed = tracked && trackedKey && view?.frame && clip
+    ? previewBox(view.frame.width, view.frame.height, {
+      x: trackedKey.x,
+      y: trackedKey.y,
+      width: tracked.width,
+      height: tracked.height,
+    }, clip.aspect)
+    : null;
 
   return (
     <div className="room">
@@ -309,12 +320,12 @@ export function Studio() {
                     src={previewSrc}
                     controls
                     playsInline
-                    className={tracked && trackedKey && view?.frame ? "tracked" : undefined}
-                    style={tracked && trackedKey && view?.frame ? {
-                      width: `${(view.frame.width / tracked.width) * 100}%`,
-                      height: `${(view.frame.height / tracked.height) * 100}%`,
-                      left: `${(-trackedKey.x / tracked.width) * 100}%`,
-                      top: `${(-trackedKey.y / tracked.height) * 100}%`,
+                    className={framed ? "tracked" : undefined}
+                    style={framed ? {
+                      width: `${framed.width}%`,
+                      height: `${framed.height}%`,
+                      left: `${framed.left}%`,
+                      top: `${framed.top}%`,
                     } : undefined}
                     onTimeUpdate={(event) => {
                       setPlayhead(event.currentTarget.currentTime);

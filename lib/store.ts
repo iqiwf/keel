@@ -1,3 +1,4 @@
+import { once } from "node:events";
 import fs from "node:fs";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
@@ -91,4 +92,34 @@ export function exportsDir(): string {
 
 export function masterPath(project: Project): string {
   return path.join(mastersDir(), project.fileName);
+}
+
+/** Stream a browser file to disk and refuse anything past the byte cap. */
+export async function writeBounded(file: File, target: string, max: number): Promise<void> {
+  if (!Number.isFinite(file.size) || file.size > max) {
+    throw new Error(`Files must be under ${Math.round(max / (1024 * 1024))} MB.`);
+  }
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  const tmp = `${target}.${process.pid}.${randomBytes(4).toString("hex")}.part`;
+  const out = fs.createWriteStream(tmp, { flags: "wx", mode: 0o600 });
+  const reader = file.stream().getReader();
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = Buffer.from(value);
+      total += chunk.length;
+      if (total > max) throw new Error(`Files must be under ${Math.round(max / (1024 * 1024))} MB.`);
+      if (!out.write(chunk)) await once(out, "drain");
+    }
+    out.end();
+    await once(out, "finish");
+    fs.renameSync(tmp, target);
+  } catch (error) {
+    out.destroy();
+    await reader.cancel().catch(() => undefined);
+    fs.rmSync(tmp, { force: true });
+    throw error;
+  }
 }

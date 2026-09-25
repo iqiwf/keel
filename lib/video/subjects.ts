@@ -1,12 +1,19 @@
 import fs from "node:fs";
 import path from "node:path";
+import { randomBytes } from "node:crypto";
 import { dataDir } from "../config";
 import type { DetectSample, SubjectTrack } from "./reframe";
 import { faceStats, followSubject } from "./reframe";
 import { run } from "./ffmpeg";
+import { sameWindows, type TimeWindow } from "./windows";
 
 export function trackPath(projectId: string): string {
   return path.join(dataDir(), "analysis", `${projectId}.json`);
+}
+
+export function sourceFingerprint(file: string): string {
+  const stat = fs.statSync(file);
+  return `${stat.size}:${Math.round(stat.mtimeMs)}`;
 }
 
 export function readTrack(projectId: string): SubjectTrack | null {
@@ -21,10 +28,19 @@ export function readTrack(projectId: string): SubjectTrack | null {
   }
 }
 
+export function trackMatches(track: SubjectTrack | null, fingerprint: string, windows?: TimeWindow[]): boolean {
+  if (!track?.fingerprint || track.fingerprint !== fingerprint) return false;
+  if (!windows?.length) return !track.coverage?.length;
+  if (!track.coverage?.length) return true;
+  return sameWindows(track.coverage, windows);
+}
+
 export function saveTrack(projectId: string, track: SubjectTrack): void {
   const file = trackPath(projectId);
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, JSON.stringify(track));
+  const tmp = path.join(path.dirname(file), `.${path.basename(file)}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`);
+  fs.writeFileSync(tmp, JSON.stringify(track));
+  fs.renameSync(tmp, file);
 }
 
 export async function detectTrack(source: string, windows?: { start: number; end: number }[]): Promise<SubjectTrack> {

@@ -1,10 +1,11 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 import { writeAss } from "../captions";
 import type { Aspect, CaptionStyle, Cue } from "../types";
 import type { CropPlan } from "./reframe";
+import type { EnergyBin } from "./windows";
 
 const exec = promisify(execFile);
 
@@ -125,10 +126,65 @@ export async function extractAudio(source: string, output: string): Promise<void
   await run("ffmpeg", ["-y", "-i", source, "-vn", "-ac", "1", "-ar", "16000", "-b:a", "64k", output]);
 }
 
-export async function scanEnergy(source: string): Promise<string> {
-  return run("ffmpeg", [
-    "-i", source, "-vn", "-ac", "1", "-ar", "16000",
-    "-af", "asetnsamples=n=16000:p=0,astats=metadata=1:reset=1,ametadata=print:key=lavfi.astats.Overall.RMS_level:file=-",
-    "-f", "null", "-",
-  ], 10 * 60_000);
+const ENERGY_RATE = 8000;
+
+/** RMS of signed 16-bit PCM, in dBFS. Silence is reported as -100. */
+export function rmsOfInt16(buffer: Buffer): number {
+  const count = Math.floor(buffer.length / 2);
+  if (!count) return -100;
+  let sum = 0;
+  for (let index = 0; index < count; index += 1) {
+    const sample = buffer.readInt16LE(index * 2) / 32768;
+    sum += sample * sample;
+  }
+  const mean = sum / count;
+  if (mean < 1e-10) return -100;
+  return Math.round(20 * Math.log10(Math.sqrt(mean)) * 100) / 100;
+}
+
+/** One-second loudness bins. Streams PCM so a long source never fills the output buffer. */
+export function scanEnergy(source: string): Promise<EnergyBin[]> {
+  const windowBytes = ENERGY_RATE * 2;
+  return new Promise((resolve, reject) => {
+    const child = spawn(bin("ffmpeg"), [
+      "-nostdin", "-v", "error",
+      "-i", source, "-vn", "-ac", "1", "-ar", String(ENERGY_RATE),
+      "-f", "s16le", "pipe:1",
+    ], { windowsHide: true });
+    const bins: EnergyBin[] = [];
+    let leftover = Buffer.alloc(0);
+    let second = 0;
+    let stderr = "";
+    const push = (chunk: Buffer) => {
+      const data = leftover.length ? Buffer.concat([leftover, chunk]) : chunk;
+      let offset = 0;
+      while (data.length - offset >= windowBytes) {
+        bins.push({ t: second, rms: rmsOfInt16(data.subarray(offset, offset + windowBytes)) });
+        second += 1;
+        offset += windowBytes;
+      }
+      leftover = Buffer.from(data.subarray(offset));
+    };
+    child.stdout.on("data", (chunk: Buffer) => push(chunk));
+    child.stderr.on("data", (chunk: Buffer) => {
+      if (stderr.length < 600) stderr += chunk.toString();
+    });
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error("ffmpeg timed out while scanning loudness."));
+    }, 10 * 60_000);
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code !== 0) {
+        reject(new Error(`ffmpeg failed: ${stderr.trim().slice(0, 600) || `exit ${code}`}`));
+        return;
+      }
+      if (leftover.length >= ENERGY_RATE) bins.push({ t: second, rms: rmsOfInt16(leftover) });
+      resolve(bins);
+    });
+  });
 }

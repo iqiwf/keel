@@ -25,6 +25,7 @@ export interface SubjectTrack {
   face: { width: number; height: number } | null;
   points: SubjectPoint[];
   coverage?: { start: number; end: number }[];
+  fingerprint?: string;
 }
 
 export interface CropKey {
@@ -249,6 +250,39 @@ function originFor(
   return {
     x: clamp(even(x), 0, Math.max(0, even(srcW - window.width))),
     y: clamp(even(y), 0, Math.max(0, even(srcH - window.height))),
+  };
+}
+
+export interface PreviewBox {
+  width: number;
+  height: number;
+  left: number;
+  top: number;
+}
+
+/**
+ * Place the source in the preview mat so the crop matches FFmpeg's
+ * crop + scale(decrease) + pad. Percentages are of the mat's own width and height.
+ */
+export function previewBox(
+  sourceWidth: number,
+  sourceHeight: number,
+  crop: { x: number; y: number; width: number; height: number },
+  aspect: Aspect,
+): PreviewBox {
+  const out = aspectRatio(aspect);
+  const cropRatio = crop.width / Math.max(1, crop.height);
+  let boxWidth = 100;
+  let boxHeight = 100;
+  if (cropRatio > out + 0.0001) boxHeight = (out / cropRatio) * 100;
+  else if (cropRatio < out - 0.0001) boxWidth = (cropRatio / out) * 100;
+  const boxLeft = (100 - boxWidth) / 2;
+  const boxTop = (100 - boxHeight) / 2;
+  return {
+    width: boxWidth * (sourceWidth / Math.max(1, crop.width)),
+    height: boxHeight * (sourceHeight / Math.max(1, crop.height)),
+    left: boxLeft - boxWidth * (crop.x / Math.max(1, crop.width)),
+    top: boxTop - boxHeight * (crop.y / Math.max(1, crop.height)),
   };
 }
 

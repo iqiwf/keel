@@ -9,6 +9,7 @@ export interface TimeWindow {
 }
 
 const LOUD = -42;
+const AUDIBLE = -62;
 
 /** Pick a few speech-heavy windows instead of the whole timeline. */
 export function selectWindows(bins: EnergyBin[], duration: number, targetSeconds: number): TimeWindow[] {
@@ -17,27 +18,35 @@ export function selectWindows(bins: EnergyBin[], duration: number, targetSeconds
   const slots = safeDuration < 25 * 60 ? 4 : 6;
   if (!bins.length) return spread(safeDuration, length, Math.min(slots, 3));
   const step = Math.max(2, length / 5);
-  const ranked: { start: number; end: number; score: number }[] = [];
+  const ranked: { start: number; end: number; score: number; peak: number; loud: number }[] = [];
   for (let start = 0; start + 8 < safeDuration; start += step) {
     const end = Math.min(safeDuration, start + length);
     const inside = bins.filter((bin) => bin.t >= start && bin.t < end);
     const loud = inside.filter((bin) => bin.rms > LOUD).length;
     const lead = inside.findIndex((bin) => bin.rms > LOUD);
-    ranked.push({ start, end, score: loud - (lead > 0 ? lead * 0.15 : 0) });
+    const peak = inside.reduce((max, bin) => Math.max(max, bin.rms), -100);
+    const score = loud * 3 + Math.max(0, peak - AUDIBLE) / 8 - (lead > 0 ? lead * 0.15 : 0);
+    ranked.push({ start, end, score, peak, loud });
   }
   const band = safeDuration / slots;
   const chosen: TimeWindow[] = [];
   for (let index = 0; index < slots; index += 1) {
     const from = index * band;
     const to = from + band;
-    const best = ranked
-      .filter((item) => item.start >= from && item.start < to && item.score > 0)
-      .sort((a, b) => b.score - a.score)[0];
+    const inBand = ranked.filter((item) => item.start >= from && item.start < to);
+    const loudest = inBand.filter((item) => item.loud > 0).sort((a, b) => b.score - a.score)[0];
+    const audible = inBand.filter((item) => item.peak > AUDIBLE).sort((a, b) => b.score - a.score)[0];
+    const best = loudest ?? audible;
     if (!best) continue;
     chosen.push({ start: Math.max(0, best.start - 1), end: Math.min(safeDuration, best.end + 2) });
   }
   if (!chosen.length) return spread(safeDuration, length, Math.min(slots, 3));
   return chosen.sort((a, b) => a.start - b.start);
+}
+
+export function sameWindows(saved: TimeWindow[] | undefined, wanted: TimeWindow[]): boolean {
+  if (!saved || saved.length !== wanted.length) return false;
+  return wanted.every((window, index) => Math.abs(saved[index].start - window.start) < 0.2 && Math.abs(saved[index].end - window.end) < 0.2);
 }
 
 function spread(duration: number, length: number, slots: number): TimeWindow[] {

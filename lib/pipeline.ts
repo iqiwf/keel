@@ -1,16 +1,47 @@
 import fs from "node:fs";
 import path from "node:path";
 import { getProvider } from "./ai";
-import { dataDir } from "./config";
+import { dataDir, whisperModel } from "./config";
 import { id } from "./ids";
+import { claim, release } from "./jobs";
 import { clipsFor, getClip, getProject, masterPath, replaceClips, saveClip, updateProject } from "./store";
 import { cuesFromWords } from "./captions";
-import type { Clip } from "./types";
+import type { Clip, Cue, Transcript } from "./types";
 import { extractAudio, probeDuration, renderClip, scanEnergy } from "./video/ffmpeg";
 import { planCrop } from "./video/reframe";
-import { detectTrack, readTrack, saveTrack } from "./video/subjects";
-import { parseEnergy, selectWindows } from "./video/windows";
+import { alignWords, readTranscript, saveTranscript, transcriptMatches } from "./video/speech";
+import { detectTrack, readTrack, saveTrack, sourceFingerprint, trackMatches } from "./video/subjects";
+import { selectWindows, type TimeWindow } from "./video/windows";
 import { downloadYoutube } from "./video/youtube";
+
+export function beginAnalyze(projectId: string, targetSeconds: number): boolean {
+  if (!claim(projectId)) return false;
+  void analyzeProject(projectId, targetSeconds).finally(() => release(projectId));
+  return true;
+}
+
+export function beginExport(clipId: string): boolean {
+  const clip = getClip(clipId);
+  if (!clip || !claim(clip.projectId)) return false;
+  void exportClip(clipId).finally(() => release(clip.projectId));
+  return true;
+}
+
+export function cutsMatch(
+  left: { start: number; end: number; aspect: string; captionStyle: string; captionText: string; cues?: Cue[] },
+  right: { start: number; end: number; aspect: string; captionStyle: string; captionText: string; cues?: Cue[] },
+): boolean {
+  const a = left.cues ?? [];
+  const b = right.cues ?? [];
+  if (a.length !== b.length) return false;
+  const cues = a.every((cue, index) => cue.start === b[index].start && cue.end === b[index].end && cue.text === b[index].text);
+  return left.start === right.start
+    && left.end === right.end
+    && left.aspect === right.aspect
+    && left.captionStyle === right.captionStyle
+    && left.captionText === right.captionText
+    && cues;
+}
 
 export async function ingestUpload(projectId: string): Promise<void> {
   const project = getProject(projectId);
@@ -36,25 +67,19 @@ export async function ingestUrl(projectId: string, pageUrl: string): Promise<voi
 export async function analyzeProject(projectId: string, targetSeconds: number): Promise<void> {
   const project = getProject(projectId);
   if (!project || project.duration < 3) return;
-  if (project.status === "analyzing" && project.stage.startsWith("Reading")) return;
   const audioPath = path.join(dataDir(), "tmp", `${projectId}.mp3`);
   try {
     updateProject(projectId, { status: "analyzing", stage: "Scanning the soundtrack", progress: 12, error: null, warning: null });
     const provider = getProvider();
     const source = masterPath(project);
+    const fingerprint = sourceFingerprint(source);
     const long = provider.name === "local" && project.duration >= 8 * 60;
-    const windows = long ? selectWindows(parseEnergy(await scanEnergy(source)), project.duration, targetSeconds) : undefined;
+    const windows = long ? selectWindows(await scanEnergy(source), project.duration, targetSeconds) : undefined;
     updateProject(projectId, { stage: "Reading the soundtrack", progress: 28 });
-    if (provider.name === "openai") {
-      fs.mkdirSync(path.dirname(audioPath), { recursive: true });
-      await extractAudio(source, audioPath);
-    }
-    const transcript = await provider.transcribe({
+    const transcript = await transcriptFor(projectId, provider.name, source, audioPath, fingerprint, windows, {
       title: project.title,
       duration: project.duration,
       targetSeconds,
-      audioPath: provider.name === "openai" ? audioPath : provider.name === "local" ? source : undefined,
-      windows,
     });
     if (!transcript.words.length && provider.name !== "mock") {
       updateProject(projectId, { warning: "No speech was detected, so these cuts have no captions. You can type a line before printing." });
@@ -62,9 +87,9 @@ export async function analyzeProject(projectId: string, targetSeconds: number): 
     updateProject(projectId, { transcript, stage: "Finding the speaker", progress: 58 });
     let trackWarning: string | null = null;
     try {
-      const cached = readTrack(projectId);
-      const same = !windows || covers(cached?.coverage, windows);
-      if (!cached || !same) saveTrack(projectId, await detectTrack(source, windows));
+      if (!trackMatches(readTrack(projectId), fingerprint, windows)) {
+        saveTrack(projectId, { ...await detectTrack(source, windows), fingerprint });
+      }
     } catch (error) {
       trackWarning = error instanceof Error ? error.message : "Speaker tracking failed.";
       console.error("speaker tracking failed", trackWarning);
@@ -101,6 +126,39 @@ export async function analyzeProject(projectId: string, targetSeconds: number): 
   }
 }
 
+async function transcriptFor(
+  projectId: string,
+  providerName: string,
+  source: string,
+  audioPath: string,
+  fingerprint: string,
+  windows: TimeWindow[] | undefined,
+  input: { title: string; duration: number; targetSeconds: number },
+): Promise<Transcript> {
+  const provider = getProvider();
+  const model = providerName === "openai"
+    ? `openai:${process.env.OPENAI_TRANSCRIBE_MODEL || "whisper-1"}`
+    : providerName === "local"
+      ? `local:${whisperModel()}`
+      : providerName;
+  const cached = readTranscript(projectId);
+  if (providerName !== "mock" && transcriptMatches(cached, fingerprint, model, windows)) return cached!.transcript;
+  if (providerName === "openai") {
+    fs.mkdirSync(path.dirname(audioPath), { recursive: true });
+    await extractAudio(source, audioPath);
+  }
+  const transcript = await provider.transcribe({
+    ...input,
+    audioPath: providerName === "openai" ? audioPath : providerName === "local" ? source : undefined,
+    windows,
+  });
+  const aligned = { ...transcript, words: alignWords(transcript.words, windows) };
+  if (providerName !== "mock") {
+    saveTranscript(projectId, { fingerprint, model, windows: windows ?? [], transcript: aligned });
+  }
+  return aligned;
+}
+
 export async function exportClip(clipId: string): Promise<void> {
   const clip = getClip(clipId);
   if (!clip) return;
@@ -115,15 +173,17 @@ export async function exportClip(clipId: string): Promise<void> {
   try {
     const latest = getClip(clipId) ?? printing;
     const track = readTrack(project.id);
+    const source = masterPath(project);
+    const fresh = track?.fingerprint && fs.existsSync(source) && track.fingerprint === sourceFingerprint(source) ? track : null;
     await renderClip({
-      source: masterPath(project), output, start: latest.start, end: latest.end,
+      source, output, start: latest.start, end: latest.end,
       aspect: latest.aspect, style: latest.captionStyle, cues: latest.cues ?? [],
       caption: latest.cues?.length ? "" : latest.captionText,
-      crop: track ? planCrop(track, latest.aspect, latest.start, latest.end) : null,
+      crop: fresh ? planCrop(fresh, latest.aspect, latest.start, latest.end) : null,
     });
     const current = getClip(clipId);
     if (!current) return;
-    const unchanged = current.start === latest.start && current.end === latest.end && current.aspect === latest.aspect && current.captionText === latest.captionText;
+    const unchanged = cutsMatch(current, latest);
     if (!unchanged) fs.rmSync(output, { force: true });
     saveClip({
       ...current,
@@ -143,12 +203,10 @@ export async function exportClip(clipId: string): Promise<void> {
 export function projectView(projectId: string) {
   const project = getProject(projectId);
   if (!project) return null;
-  return { project, clips: clipsFor(projectId), frame: readTrack(projectId) };
-}
-
-function covers(saved: { start: number; end: number }[] | undefined, wanted: { start: number; end: number }[]): boolean {
-  if (!saved || saved.length !== wanted.length) return false;
-  return wanted.every((window, index) => Math.abs(saved[index].start - window.start) < 0.2 && Math.abs(saved[index].end - window.end) < 0.2);
+  const frame = readTrack(projectId);
+  const file = masterPath(project);
+  const live = fs.existsSync(file) ? sourceFingerprint(file) : "";
+  return { project, clips: clipsFor(projectId), frame: frame?.fingerprint === live ? frame : null };
 }
 
 function fail(projectId: string, error: unknown): void {

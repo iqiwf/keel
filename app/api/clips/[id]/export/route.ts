@@ -1,5 +1,5 @@
 import { fail, json } from "@/lib/http";
-import { exportClip } from "@/lib/pipeline";
+import { beginExport } from "@/lib/pipeline";
 import { getClip, getProject } from "@/lib/store";
 
 export const runtime = "nodejs";
@@ -14,7 +14,9 @@ export async function POST(
   if (!clip) return fail(new Error("That cut is gone."), 404);
   const project = getProject(clip.projectId);
   if (!project) return fail(new Error("That source is gone."), 404);
-  if (clip.status === "exporting") return fail(new Error("This cut is already printing."));
-  void exportClip(id);
+  if (clip.status === "exporting" || project.status === "analyzing") {
+    return fail(new Error("This source is already busy."), 409);
+  }
+  if (!beginExport(id)) return fail(new Error("This source is already busy."), 409);
   return json({ ok: true }, 202);
 }
