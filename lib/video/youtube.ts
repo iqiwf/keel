@@ -27,9 +27,11 @@ export async function downloadYoutube(pageUrl: string, output: string): Promise<
   if (!fs.existsSync(output)) {
     const dir = path.dirname(output);
     const base = path.basename(output, path.extname(output));
-    const found = fs.readdirSync(dir).find((name) => name.startsWith(base) && name !== path.basename(output));
+    const found = fs.readdirSync(dir).find((name) => name === `${base}.mp4` || name === `${base}.mkv` || name === `${base}.webm`);
     if (!found) throw new Error("The download finished without a video file.");
-    fs.renameSync(path.join(dir, found), output);
+    const from = path.join(dir, found);
+    if (!from.startsWith(path.resolve(dir) + path.sep)) throw new Error("The download finished without a video file.");
+    fs.renameSync(from, output);
   }
   const title = printed
     .split(/\r?\n/)

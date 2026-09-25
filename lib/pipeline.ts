@@ -45,7 +45,7 @@ export async function analyzeProject(projectId: string, targetSeconds: number): 
     const long = provider.name === "local" && project.duration >= 8 * 60;
     const windows = long ? selectWindows(parseEnergy(await scanEnergy(source)), project.duration, targetSeconds) : undefined;
     updateProject(projectId, { stage: "Reading the soundtrack", progress: 28 });
-    if (provider.name !== "mock") {
+    if (provider.name === "openai") {
       fs.mkdirSync(path.dirname(audioPath), { recursive: true });
       await extractAudio(source, audioPath);
     }
@@ -53,7 +53,7 @@ export async function analyzeProject(projectId: string, targetSeconds: number): 
       title: project.title,
       duration: project.duration,
       targetSeconds,
-      audioPath: provider.name === "mock" ? undefined : audioPath,
+      audioPath: provider.name === "openai" ? audioPath : provider.name === "local" ? source : undefined,
       windows,
     });
     if (!transcript.words.length && provider.name !== "mock") {
@@ -109,9 +109,11 @@ export async function exportClip(clipId: string): Promise<void> {
   const outputName = `${clip.id}.mp4`;
   const output = path.join(dataDir(), "exports", outputName);
   fs.mkdirSync(path.dirname(output), { recursive: true });
-  saveClip({ ...clip, status: "exporting", error: null });
+  const printing = getClip(clipId);
+  if (!printing) return;
+  saveClip({ ...printing, status: "exporting", error: null });
   try {
-    const latest = getClip(clipId) ?? clip;
+    const latest = getClip(clipId) ?? printing;
     const track = readTrack(project.id);
     await renderClip({
       source: masterPath(project), output, start: latest.start, end: latest.end,
@@ -119,7 +121,16 @@ export async function exportClip(clipId: string): Promise<void> {
       caption: latest.cues?.length ? "" : latest.captionText,
       crop: track ? planCrop(track, latest.aspect, latest.start, latest.end) : null,
     });
-    saveClip({ ...latest, status: "exported", exportName: outputName, error: null });
+    const current = getClip(clipId);
+    if (!current) return;
+    const unchanged = current.start === latest.start && current.end === latest.end && current.aspect === latest.aspect && current.captionText === latest.captionText;
+    if (!unchanged) fs.rmSync(output, { force: true });
+    saveClip({
+      ...current,
+      status: unchanged ? "exported" : "ready",
+      exportName: unchanged ? outputName : null,
+      error: unchanged ? null : "The cut changed while printing. Print it again.",
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Export failed.";
     console.error("export failed", message);

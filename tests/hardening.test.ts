@@ -41,6 +41,18 @@ test("reframe crop dimensions remain valid for every supported aspect", () => {
   }
 });
 
+test("highlights prefer a question with a point over filler", () => {
+  const words = [
+    ...["um", "uh", "like", "um"].map((text, index) => ({ text, start: 2 + index * 0.4, end: 2.3 + index * 0.4 })),
+    ...["Why", "does", "this", "matter?"].map((text, index) => ({ text, start: 20 + index * 0.35, end: 20.3 + index * 0.35 })),
+  ];
+  const clips = highlightsFromSpeech(40, 12, { language: "en", text: words.map((word) => word.text).join(" "), words });
+  assert.ok(clips.some((clip) => clip.start > 10), `question was not selected: ${clips.map((clip) => clip.start).join(",")}`);
+  const question = clips.find((clip) => clip.start > 10);
+  const filler = clips.find((clip) => clip.start <= 10);
+  if (question && filler) assert.ok(question.score >= filler.score);
+});
+
 test("highlights prefer a clean opening over a long sparse passage", () => {
   const words = [
     ...["Wait", "for", "this."].map((text, index) => ({ text, start: 1 + index * 0.4, end: 1.3 + index * 0.4 })),

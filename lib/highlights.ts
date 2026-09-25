@@ -23,7 +23,9 @@ function scoreWindow(words: TranscriptWord[], start: number, end: number): { sco
   const front = spoken.filter((word) => word.start < start + span * 0.4);
   const frontSpeech = front.reduce((sum, word) => sum + Math.max(0, word.end - word.start), 0);
   const hook = frontSpeech > speech * 0.55 ? 1.2 : 0;
-  return { score: speech + (speech / span) * 4 + hook - lead * 0.45 - gap * 0.9, start: first, end: last };
+  const filler = spoken.filter((word) => /^(um+|uh+|er+|ah+|like)$/i.test(word.text)).length;
+  const question = spoken.some((word) => word.text.endsWith("?")) ? 0.8 : 0;
+  return { score: speech + (speech / span) * 4 + hook + question - filler * 0.45 - lead * 0.45 - gap * 0.9, start: first, end: last };
 }
 
 export function highlightsFromSpeech(duration: number, targetSeconds: number, transcript: Transcript): HighlightDraft[] {
