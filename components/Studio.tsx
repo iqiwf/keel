@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Aspect, CaptionStyle, Clip, Cue, Project } from "@/lib/types";
-import { canMark, canStop } from "@/lib/jobs";
+import { canMark, canStop } from "@/lib/job-rules";
 import { planCrop, previewBox, type SubjectTrack } from "@/lib/video/reframe";
 
 type View = { project: Project; clips: Clip[]; frame?: SubjectTrack | null; live?: boolean };

@@ -1,3 +1,8 @@
+import { claimFile, heldByLiveProcess, liveLockIds, releaseFile } from "./locks";
+import { canMark, canStop, sourceBusy } from "./job-rules";
+
+export { canMark, canStop, sourceBusy };
+
 const active = new Set<string>();
 const cancelled = new Set<string>();
 const controllers = new Map<string, AbortController>();
@@ -13,12 +18,15 @@ export function jobLimit(): number {
 }
 
 export function atCapacity(): boolean {
-  return active.size >= jobLimit();
+  return liveLockIds().length >= jobLimit();
 }
 
-/** One analyze or export at a time per source, and only a few heavy jobs at once. */
+/** One analyze or export at a time per source, including a job held by another process. */
 export function claim(projectId: string): boolean {
-  if (active.has(projectId) || active.size >= jobLimit()) return false;
+  if (active.has(projectId) || heldByLiveProcess(projectId)) return false;
+  const live = liveLockIds();
+  if (!live.includes(projectId) && live.length >= jobLimit()) return false;
+  if (!claimFile(projectId)) return false;
   active.add(projectId);
   return true;
 }
@@ -26,10 +34,17 @@ export function claim(projectId: string): boolean {
 export function release(projectId: string): void {
   active.delete(projectId);
   controllers.delete(projectId);
+  releaseFile(projectId);
 }
 
+/** True only for a job this process started. Another process's lock is not ours to cancel. */
 export function claimed(projectId: string): boolean {
   return active.has(projectId);
+}
+
+/** True when this process or any other live process holds the source. */
+export function jobLive(projectId: string): boolean {
+  return active.has(projectId) || heldByLiveProcess(projectId);
 }
 
 export function arm(projectId: string): AbortSignal {
@@ -40,21 +55,6 @@ export function arm(projectId: string): AbortSignal {
 
 export function jobSignal(projectId: string): AbortSignal | undefined {
   return controllers.get(projectId)?.signal;
-}
-
-/** A crashed process leaves no claim, so a stale "analyzing" status can be retried. */
-export function sourceBusy(isClaimed: boolean): boolean {
-  return isClaimed;
-}
-
-/** A live job blocks another mark. A crashed job does not. */
-export function canMark(duration: number, live: boolean): boolean {
-  return duration >= 3 && !live;
-}
-
-/** Stop stays available for a running job and for one left stuck on analyzing. */
-export function canStop(status: string, live: boolean): boolean {
-  return live || status === "analyzing";
 }
 
 export function requestCancel(projectId: string): void {

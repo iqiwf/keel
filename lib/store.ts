@@ -102,7 +102,7 @@ export function exportsDir(): string {
   return dir;
 }
 
-export function masterPath(project: Project): string {
+export function masterPath(project: Pick<Project, "fileName">): string {
   return path.join(mastersDir(), project.fileName);
 }
 

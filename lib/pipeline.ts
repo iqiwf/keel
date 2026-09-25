@@ -4,17 +4,18 @@ import { getProvider } from "./ai";
 import { dataDir } from "./config";
 import { id } from "./ids";
 import { sanitizeDrafts } from "./highlights";
-import { arm, claim, claimed, forgetCancel, jobSignal, release, wasCancelled } from "./jobs";
+import { arm, claim, claimed, forgetCancel, jobLive, jobSignal, release, wasCancelled } from "./jobs";
+import { heldByLiveProcess, releaseDisk, reserveDisk } from "./locks";
 import { WHISPER_CACHE_VERSION } from "./video/speech";
 import { clipsFor, getClip, getProject, masterPath, replaceClips, saveClip, updateProject } from "./store";
 import { cuesFromWords } from "./captions";
-import type { Clip, Cue, Transcript } from "./types";
+import type { Clip, Cue, Project, Transcript } from "./types";
 import { extractAudio, probeMedia, renderClip, scanEnergy } from "./video/ffmpeg";
 import { planCrop } from "./video/reframe";
 import { alignWords, clampWordsToWindows, localModelKey, readTranscript, saveTranscript, transcriptMatches } from "./video/speech";
 import { detectTrack, readTrack, saveTrack, sourceFingerprint, TrackingStopped, trackMatches } from "./video/subjects";
 import { selectWindows, type TimeWindow } from "./video/windows";
-import { downloadYoutube } from "./video/youtube";
+import { downloadCapMb, downloadYoutube, removeDownloadLeftovers } from "./video/youtube";
 
 export function beginAnalyze(projectId: string, targetSeconds: number): boolean {
   if (!claim(projectId)) return false;
@@ -74,8 +75,12 @@ export async function ingestUpload(projectId: string): Promise<void> {
 export async function ingestUrl(projectId: string, pageUrl: string): Promise<void> {
   const project = getProject(projectId);
   if (!project) return;
+  let reserved = false;
   try {
     updateProject(projectId, { stage: "Fetching the source", progress: 15, status: "analyzing" });
+    const cap = downloadCapMb() * 1024 * 1024;
+    if (!reserveDisk(projectId, cap)) throw new Error("Not enough free disk space to fetch that video.");
+    reserved = true;
     const file = path.join(path.dirname(masterPath(project)), project.fileName);
     const signal = jobSignal(projectId);
     if (wasCancelled(projectId)) {
@@ -100,13 +105,16 @@ export async function ingestUrl(projectId: string, pageUrl: string): Promise<voi
       return;
     }
     fail(projectId, error);
+  } finally {
+    if (reserved) releaseDisk(projectId);
   }
 }
 
-export function releaseStuck(projectId: string): void {
+export function releaseStuck(projectId: string): boolean {
+  if (claimed(projectId) || heldByLiveProcess(projectId)) return false;
   forgetCancel(projectId);
   const project = getProject(projectId);
-  if (!project) return;
+  if (!project) return false;
   const ready = project.duration >= 3;
   updateProject(projectId, {
     status: ready ? "draft" : "failed",
@@ -118,6 +126,9 @@ export function releaseStuck(projectId: string): void {
   for (const clip of clipsFor(projectId)) {
     if (clip.status === "exporting") saveClip({ ...clip, status: "ready", error: null });
   }
+  if (ready) removeDownloadLeftovers(masterPath(project));
+  else clearIncomplete(project);
+  return true;
 }
 
 export async function analyzeProject(projectId: string, targetSeconds: number): Promise<void> {
@@ -302,13 +313,14 @@ export function projectView(projectId: string) {
   const frame = readTrack(projectId);
   const file = masterPath(project);
   const live = fs.existsSync(file) ? sourceFingerprint(file) : "";
-  return { project, clips: clipsFor(projectId), frame: frame?.fingerprint === live ? frame : null, live: claimed(projectId) };
+  return { project, clips: clipsFor(projectId), frame: frame?.fingerprint === live ? frame : null, live: jobLive(projectId) };
 }
 
 function stopped(projectId: string): boolean {
   if (!wasCancelled(projectId)) return false;
   forgetCancel(projectId);
-  const ready = (getProject(projectId)?.duration ?? 0) >= 3;
+  const project = getProject(projectId);
+  const ready = (project?.duration ?? 0) >= 3;
   updateProject(projectId, {
     status: ready ? "draft" : "failed",
     stage: ready ? "Ready to mark" : "Stopped",
@@ -316,7 +328,20 @@ function stopped(projectId: string): boolean {
     error: null,
     warning: ready ? "Marking was stopped." : "The fetch was stopped.",
   });
+  if (project) {
+    if (ready) removeDownloadLeftovers(masterPath(project));
+    else clearIncomplete(project);
+  }
   return true;
+}
+
+/** An unfinished fetch has duration under 3 seconds, so its master is not a real source. */
+function clearIncomplete(project: Pick<Project, "fileName">): void {
+  const master = masterPath(project);
+  removeDownloadLeftovers(master);
+  fs.rmSync(master, { force: true });
+  fs.rmSync(`${master}.part`, { force: true });
+  fs.rmSync(`${master}.ytdl`, { force: true });
 }
 
 function fail(projectId: string, error: unknown): void {
