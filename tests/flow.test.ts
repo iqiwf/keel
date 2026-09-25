@@ -4,7 +4,11 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { mockProvider } from "../lib/ai/mock";
+import { cuesFromWords } from "../lib/captions";
 import { renderClip } from "../lib/video/ffmpeg";
+import { followSubject, planCrop } from "../lib/video/reframe";
+import { detectTrack } from "../lib/video/subjects";
+import { transcribeFile } from "../lib/video/speech";
 import { assertVideoFile, parseVideoUrl } from "../lib/validation";
 
 test("accepts public YouTube links and rejects other hosts", () => {
@@ -153,6 +157,136 @@ test("upload, mark, trim, and print through the app routes", async () => {
   assert.ok(fs.statSync(exported).size > 1000);
   fs.rmSync(root, { recursive: true, force: true });
 });
+
+test("the frame follows a subject across the picture and ignores tiny jitter", () => {
+  const samples = Array.from({ length: 13 }, (_, index) => ({
+    t: index * 0.25,
+    faces: [{ x: 80 + index * 60, y: 80, w: 90, h: 110 }],
+    motion: null,
+  }));
+  const points = followSubject(samples, 960, 540);
+  assert.ok(points[points.length - 1].x > points[0].x + 400);
+  assert.ok(Math.abs(points[points.length - 1].x - (80 + 12 * 60 + 45)) < 180);
+  const jitter = followSubject([
+    { t: 0, faces: [{ x: 400, y: 80, w: 80, h: 80 }], motion: null },
+    { t: 0.25, faces: [{ x: 404, y: 82, w: 80, h: 80 }], motion: null },
+    { t: 0.5, faces: [{ x: 398, y: 79, w: 80, h: 80 }], motion: null },
+  ], 960, 540);
+  assert.ok(Math.abs(jitter[2].x - jitter[0].x) < 30);
+});
+
+test("a clearly larger second speaker takes over, then holds", () => {
+  const samples = [0, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.25, 2.5, 2.75, 3].map((t) => ({
+    t,
+    faces: t < 1
+      ? [{ x: 40, y: 60, w: 80, h: 80 }]
+      : [{ x: 40, y: 60, w: 70, h: 70 }, { x: 700, y: 50, w: 150, h: 160 }],
+    motion: null,
+  }));
+  const points = followSubject(samples, 960, 540);
+  assert.ok(points[2].x < 250);
+  assert.ok(points[points.length - 1].x > 700);
+  const jump = Math.max(...points.slice(1).map((point, index) => Math.abs(point.x - points[index].x)));
+  assert.ok(jump < 250, `pan jumped by ${jump}`);
+});
+
+test("caption cues stay inside the cut and keep their spoken times", () => {
+  const cues = cuesFromWords([
+    { text: "Ini", start: 1.0, end: 1.3 },
+    { text: "adalah", start: 1.3, end: 1.7 },
+    { text: "uji", start: 1.7, end: 2.0 },
+    { text: "ucapan.", start: 2.0, end: 2.5 },
+    { text: "Lanjut", start: 4.2, end: 4.6 },
+  ], 0.8, 3.2);
+  assert.equal(cues.length, 1);
+  assert.equal(cues[0].text, "Ini adalah uji ucapan.");
+  assert.ok(cues[0].start >= 0.8 && cues[0].end <= 3.2);
+});
+
+test("a moving subject stays inside the printed 9:16 frame", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "keel-track-"));
+  const source = path.join(root, "move.mp4");
+  const output = path.join(root, "cut.mp4");
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const exec = promisify(execFile);
+  await exec("ffmpeg", [
+    "-y", "-f", "lavfi", "-i", "color=c=black:s=960x540:d=4:r=12",
+    "-f", "lavfi", "-i", "color=c=white:s=140x150:d=4:r=12",
+    "-f", "lavfi", "-i", "anullsrc=r=48000:cl=mono",
+    "-filter_complex", "overlay=x='30+180*t':y=190",
+    "-shortest",
+    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", source,
+  ]);
+  const track = await detectTrack(source);
+  const plan = planCrop(track, "9:16", 0.2, 3.6);
+  assert.ok(plan.keys[plan.keys.length - 1].x > plan.keys[0].x + 120, "crop should travel with the subject");
+  await renderClip({
+    source,
+    output,
+    start: 0.2,
+    end: 3.6,
+    aspect: "9:16",
+    style: "ledger",
+    caption: "",
+    cues: [{ start: 0.4, end: 1.2, text: "Keep this passage" }],
+    crop: plan,
+  });
+  const early = await brightCenter(exec, output, 0.35, root);
+  const late = await brightCenter(exec, output, 2.8, root);
+  assert.ok(early.count > 400, "subject missing at the start of the export");
+  assert.ok(late.count > 400, "subject missing at the end of the export");
+  assert.ok(early.x > 0.28 && early.x < 0.72, `early frame drifted to ${early.x}`);
+  assert.ok(late.x > 0.28 && late.x < 0.72, `late frame drifted to ${late.x}`);
+  const spoken = await captionInk(output, 0.6, root);
+  const silent = await captionInk(output, 2.6, root);
+  assert.ok(spoken > 1500, `caption ink too faint: ${spoken}`);
+  assert.ok(spoken > silent * 4, "burned caption did not change the picture");
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test("spoken audio becomes timed words", { timeout: 180_000 }, async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "keel-speech-"));
+  const wav = path.join(root, "speech.wav");
+  const spoken = "This is a spoken caption test for the cutting room.";
+  await new Promise<void>((resolve, reject) => {
+    const ps = `Add-Type -AssemblyName System.Speech; $s = New-Object System.Speech.Synthesis.SpeechSynthesizer; $s.SetOutputToWaveFile('${wav.replace(/'/g, "''")}'); $s.Speak('${spoken}'); $s.Dispose()`;
+    import("node:child_process").then(({ execFile }) => {
+      execFile("powershell", ["-NoProfile", "-Command", ps], { windowsHide: true }, (error) => error ? reject(error) : resolve());
+    });
+  });
+  const transcript = await transcribeFile(wav);
+  assert.ok(transcript.words.length >= 4, `expected words, got ${transcript.text}`);
+  const heard = transcript.text.toLowerCase();
+  assert.ok(heard.includes("caption") || heard.includes("spoken") || heard.includes("cutting"), heard);
+  assert.ok(transcript.words.every((word, index) => index === 0 || word.start >= transcript.words[index - 1].start - 0.05));
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+async function brightCenter(
+  exec: (file: string, args: string[]) => Promise<unknown>,
+  video: string,
+  time: number,
+  root: string,
+): Promise<{ x: number; count: number }> {
+  const png = path.join(root, `f-${time}.png`);
+  await exec("ffmpeg", ["-y", "-ss", String(time), "-i", video, "-frames:v", "1", png]);
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const { stdout } = await promisify(execFile)("python", ["-c", "import cv2,sys; img=cv2.imread(sys.argv[1],0); ys,xs=(img>180).nonzero(); print(0 if len(xs)==0 else xs.mean()/img.shape[1]); print(len(xs))", png]);
+  const [x, count] = stdout.trim().split(/\s+/).map(Number);
+  return { x, count };
+}
+
+async function captionInk(video: string, time: number, root: string): Promise<number> {
+  const png = path.join(root, `l-${time}.png`);
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const exec = promisify(execFile);
+  await exec("ffmpeg", ["-y", "-ss", String(time), "-i", video, "-frames:v", "1", png]);
+  const { stdout } = await exec("python", ["-c", "import cv2,sys; img=cv2.imread(sys.argv[1]); h=img.shape[0]; band=img[int(h*0.70):int(h*0.96)]; print(int((band.max(axis=2)>40).sum()))", png]);
+  return Number(stdout.trim());
+}
 
 async function waitFor<T>(read: () => Promise<T | null>): Promise<T> {
   const started = Date.now();

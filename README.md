@@ -29,8 +29,11 @@ The provider is chosen on the server. The browser never sees an API key.
 
 | `AI_PROVIDER` | Behavior |
 | --- | --- |
-| `mock` (default) | Builds a timed transcript from the video length and picks spaced cuts. No network call. |
-| `openai` | Extracts speech, transcribes it, then asks a chat model for cuts. Requires `OPENAI_API_KEY`. |
+| `local` (default) | Transcribes the soundtrack on this machine with faster-whisper, then times captions to those words. No API key. |
+| `mock` | Builds a timed transcript from the video length. For tests. |
+| `openai` | Sends audio to the transcription API, then asks a chat model for cuts. Requires `OPENAI_API_KEY`. |
+
+`WHISPER_MODEL` defaults to `small`, which covers Indonesian and English. Set `WHISPER_LANGUAGE=id` to force Indonesian. Speaker framing uses a local face detector and follows the active person in the printed file. If nobody is found, the frame stays centered and the cut still exports.
 
 Swap the implementation by editing `lib/ai` and returning a new `AiProvider` from `lib/ai/index.ts`.
 

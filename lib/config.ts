@@ -12,6 +12,12 @@ export function maxUploadBytes(): number {
   return Math.floor(mb) * 1024 * 1024;
 }
 
-export function aiProviderName(): "mock" | "openai" {
-  return process.env.AI_PROVIDER === "openai" ? "openai" : "mock";
+export function aiProviderName(): "local" | "mock" | "openai" {
+  if (process.env.AI_PROVIDER === "mock") return "mock";
+  if (process.env.AI_PROVIDER === "openai") return "openai";
+  return "local";
+}
+
+export function whisperModel(): string {
+  return process.env.WHISPER_MODEL || "small";
 }

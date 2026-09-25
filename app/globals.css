@@ -246,6 +246,8 @@ input:focus, textarea:focus { outline: 2px solid var(--copper); outline-offset: 
 .reason { color: var(--mute); margin: 8px 0 14px; line-height: 1.4; }
 .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .frames, .styles { display: flex; gap: 6px; flex-wrap: wrap; }
+.cues { display: grid; gap: 8px; margin-top: 10px; max-height: 220px; overflow: auto; }
+.cues label { grid-template-columns: 58px 1fr; align-items: center; }
 .note { color: var(--mute); font-size: 13px; line-height: 1.4; }
 .warn { color: #f0b2ab; }
 .good { color: var(--ok); }

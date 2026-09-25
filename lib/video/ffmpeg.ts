@@ -2,7 +2,9 @@ import { execFile } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
-import type { Aspect, CaptionStyle } from "../types";
+import { writeAss } from "../captions";
+import type { Aspect, CaptionStyle, Cue } from "../types";
+import type { CropPlan } from "./reframe";
 
 const exec = promisify(execFile);
 
@@ -19,9 +21,10 @@ export async function run(
   try {
     const { stdout, stderr } = await exec(bin(command), args, {
       timeout,
-      maxBuffer: 8 * 1024 * 1024,
+      maxBuffer: 16 * 1024 * 1024,
       windowsHide: true,
       cwd,
+      env: { ...process.env, PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1" },
     });
     return `${stdout}\n${stderr}`;
   } catch (error) {
@@ -54,53 +57,12 @@ export function frameSize(aspect: Aspect): { width: number; height: number } {
   return { width: 1920, height: 1080 };
 }
 
-function assTime(seconds: number): string {
-  const total = Math.max(0, seconds);
-  const hours = Math.floor(total / 3600);
-  const minutes = Math.floor((total % 3600) / 60);
-  const secs = Math.floor(total % 60);
-  const cs = Math.floor((total - Math.floor(total)) * 100);
-  const pad = (value: number) => String(value).padStart(2, "0");
-  return `${hours}:${pad(minutes)}:${pad(secs)}.${pad(cs)}`;
-}
-
-function assText(value: string): string {
-  return value
-    .replace(/\\/g, " ")
-    .replace(/[{}]/g, "")
-    .replace(/\r?\n/g, "\\N")
-    .slice(0, 220);
-}
-
-function styleLine(name: CaptionStyle, height: number): string {
-  const size = height >= 1600 ? 58 : height === 1080 && name !== "quiet" ? 48 : 42;
-  if (name === "ticker") {
-    return `Style: Active,Arial,${size},&H00FFFFFF,&H000000FF,&H00000000,&HA0000000,1,0,0,0,100,100,0,0,3,16,0,2,70,70,90,1`;
-  }
-  if (name === "quiet") {
-    return `Style: Active,Arial,${size},&H00F4EFE6,&H000000FF,&H00302820,&H00000000,0,0,0,0,100,100,0,0,1,2,0,2,80,80,70,1`;
-  }
-  return `Style: Active,Arial,${size},&H0012161A,&H000000FF,&H00000000,&H007AC2E4,1,0,0,0,100,100,0,0,3,18,0,2,64,64,110,1`;
-}
-
-function writeCaption(file: string, caption: string, style: CaptionStyle, width: number, height: number, length: number): void {
-  const body = [
-    "[Script Info]",
-    "ScriptType: v4.00+",
-    `PlayResX: ${width}`,
-    `PlayResY: ${height}`,
-    "WrapStyle: 0",
-    "",
-    "[V4+ Styles]",
-    "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
-    styleLine(style, height),
-    "",
-    "[Events]",
-    "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
-    `Dialogue: 0,${assTime(0)},${assTime(length)},Active,,0,0,0,,${assText(caption)}`,
-    "",
-  ].join("\n");
-  fs.writeFileSync(file, body, "utf8");
+function writeCropCommands(file: string, keys: { t: number; x: number; y: number }[]): void {
+  const lines = keys.map((key, index) => {
+    const next = keys[index + 1]?.t ?? key.t + 0.2;
+    return `${key.t.toFixed(3)}-${Math.max(next, key.t + 0.05).toFixed(3)} crop x ${key.x}, crop y ${key.y};`;
+  });
+  fs.writeFileSync(file, `${lines.join("\n")}\n`, "utf8");
 }
 
 export async function renderClip(input: {
@@ -109,44 +71,88 @@ export async function renderClip(input: {
   start: number;
   end: number;
   aspect: Aspect;
-  caption: string;
   style: CaptionStyle;
+  cues?: Cue[];
+  caption?: string;
+  crop?: CropPlan | null;
 }): Promise<void> {
   const { width, height } = frameSize(input.aspect);
   const directory = path.dirname(input.output);
   fs.mkdirSync(directory, { recursive: true });
-  const captionName = `${path.basename(input.output, ".mp4")}.ass`;
+  const stem = path.basename(input.output, ".mp4");
+  const captionName = `${stem}.ass`;
   const captionPath = path.join(directory, captionName);
-  const length = Math.max(0.4, input.end - input.start);
-  if (input.caption.trim()) writeCaption(captionPath, input.caption, input.style, width, height, length);
-
-  const scale = `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height}`;
-  const filter = input.caption.trim() ? `${scale},ass=${captionName}` : scale;
+  const commandName = `${stem}.cmd`;
+  const commandPath = path.join(directory, commandName);
+  const cues = input.cues?.filter((cue) => cue.text.trim()) ?? [];
+  const burned = cues.length
+    ? cues
+    : input.caption?.trim()
+      ? [{ start: input.start, end: input.end, text: input.caption.trim() }]
+      : [];
+  if (burned.length) {
+    writeAss({
+      file: captionPath,
+      cues: burned,
+      style: input.style,
+      width,
+      height,
+      clipStart: input.start,
+      clipEnd: input.end,
+    });
+  }
+  const filters: string[] = [];
+  if (input.crop && input.crop.keys.length && input.crop.width >= 2 && input.crop.height >= 2) {
+    writeCropCommands(commandPath, input.crop.keys);
+    const first = input.crop.keys[0];
+    filters.push(`sendcmd=f=${commandName}`, `crop=${input.crop.width}:${input.crop.height}:${first.x}:${first.y}`);
+  }
+  if (input.crop && input.crop.keys.length) {
+    filters.push(
+      `scale=${width}:${height}:force_original_aspect_ratio=decrease:flags=lanczos`,
+      `pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:black`,
+      "setsar=1",
+    );
+  } else {
+    filters.push(`scale=${width}:${height}:force_original_aspect_ratio=increase:flags=lanczos`, `crop=${width}:${height}`, "setsar=1");
+  }
+  if (burned.length && fs.existsSync(captionPath)) filters.push(`ass=${captionName}`);
+  const duration = Math.max(0.4, input.end - input.start);
+  const lead = Math.min(input.start, 1);
+  const coarse = Math.max(0, input.start - lead);
   try {
     await run(
       "ffmpeg",
       [
         "-y",
         "-ss",
-        input.start.toFixed(3),
-        "-to",
-        input.end.toFixed(3),
+        coarse.toFixed(3),
         "-i",
         input.source,
+        "-ss",
+        (input.start - coarse).toFixed(3),
+        "-t",
+        duration.toFixed(3),
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a:0?",
         "-vf",
-        filter,
+        filters.join(","),
         "-c:v",
         "libx264",
         "-preset",
-        "veryfast",
+        "fast",
         "-crf",
-        "23",
+        "18",
         "-pix_fmt",
         "yuv420p",
         "-c:a",
         "aac",
         "-b:a",
-        "128k",
+        "160k",
+        "-ar",
+        "48000",
         "-movflags",
         "+faststart",
         path.basename(input.output),
@@ -156,6 +162,7 @@ export async function renderClip(input: {
     );
   } finally {
     fs.rmSync(captionPath, { force: true });
+    fs.rmSync(commandPath, { force: true });
   }
 }
 

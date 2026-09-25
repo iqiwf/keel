@@ -90,6 +90,11 @@ export const clipPatchSchema = z
     aspect: z.enum(ASPECTS).optional(),
     captionStyle: z.enum(CAPTION_STYLES).optional(),
     captionText: z.string().max(500).optional(),
+    cues: z.array(z.object({
+      start: z.number().min(0).max(60 * 60 * 6),
+      end: z.number().min(0).max(60 * 60 * 6),
+      text: z.string().max(160),
+    })).max(80).optional(),
   })
   .strict();
 

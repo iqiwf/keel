@@ -1,9 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { Aspect, CaptionStyle, Clip, Project } from "@/lib/types";
+import type { Aspect, CaptionStyle, Clip, Cue, Project } from "@/lib/types";
+import { previewFocus, type SubjectTrack } from "@/lib/video/reframe";
 
-type View = { project: Project; clips: Clip[] };
+type View = { project: Project; clips: Clip[]; frame?: SubjectTrack | null };
 
 const LENGTHS = [15, 30, 45, 60] as const;
 const ASPECTS: Aspect[] = ["9:16", "1:1", "16:9"];
@@ -29,6 +30,7 @@ export function Studio() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [hot, setHot] = useState(false);
+  const [playhead, setPlayhead] = useState(0);
   const videoRef = useRef<HTMLVideoElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -174,7 +176,11 @@ export function Studio() {
     return "";
   }, [view, clip]);
 
-  const showLiveCaption = Boolean(clip && previewSrc && !clip.exportName);
+  const liveCue = clip?.cues?.find((cue) => playhead >= cue.start - 0.05 && playhead <= cue.end + 0.08);
+  const liveText = clip?.exportName ? "" : liveCue?.text || (!clip?.cues?.length ? clip?.captionText : "");
+  const focus = view?.frame && clip && !clip.exportName
+    ? previewFocus(view.frame, playhead || clip.start, clip.aspect)
+    : null;
 
   return (
     <div className="room">
@@ -300,7 +306,9 @@ export function Studio() {
                     src={previewSrc}
                     controls
                     playsInline
+                    style={focus ? { objectPosition: `${focus.x * 100}% ${focus.y * 100}%` } : undefined}
                     onTimeUpdate={(event) => {
+                      setPlayhead(event.currentTarget.currentTime);
                       if (!clip || clip.exportName) return;
                       if (event.currentTarget.currentTime > clip.end) {
                         event.currentTarget.pause();
@@ -308,14 +316,14 @@ export function Studio() {
                       }
                     }}
                   />
-                  {showLiveCaption && clip?.captionText ? (
-                    <div className={`caption-live ${clip.captionStyle}`}>{clip.captionText}</div>
+                  {liveText ? (
+                    <div className={`caption-live ${clip?.captionStyle ?? "ledger"}`}>{liveText}</div>
                   ) : null}
                 </div>
               </div>
               <div className="timecode">
                 <span>{clip ? `${clock(clip.start)}  →  ${clock(clip.end)}` : "--"}</span>
-                <span>{clip?.exportName ? "Printed master" : "Preview, captions not burned"}</span>
+                <span>{clip?.exportName ? "Printed master" : "Preview. Print burns the timed lines and the speaker frame."}</span>
               </div>
             </>
           )}
@@ -398,21 +406,42 @@ export function Studio() {
                   </button>
                 ))}
               </div>
-              <label style={{ marginTop: 10 }}>
-                Words on the cut
-                <textarea
-                  value={clip.captionText}
-                  maxLength={500}
-                  onChange={(event) => {
-                    const captionText = event.target.value;
-                    setView((current) => current && ({
-                      ...current,
-                      clips: current.clips.map((item) => item.id === clip.id ? { ...item, captionText } : item),
-                    }));
-                  }}
-                  onBlur={(event) => void patch({ captionText: event.target.value })}
-                />
-              </label>
+              {clip.cues?.length ? (
+                <div className="cues">
+                  {clip.cues.map((cue, index) => (
+                    <label key={`${clip.id}-${index}`}>
+                      {clock(cue.start)}
+                      <input
+                        type="text"
+                        defaultValue={cue.text}
+                        key={`${clip.id}-${index}-${cue.text}`}
+                        maxLength={160}
+                        onBlur={(event) => {
+                          const cues: Cue[] = clip.cues.map((item, itemIndex) => itemIndex === index ? { ...item, text: event.target.value } : item);
+                          void patch({ cues, captionText: cues.map((item) => item.text).join(" ") });
+                        }}
+                      />
+                    </label>
+                  ))}
+                </div>
+              ) : (
+                <label style={{ marginTop: 10 }}>
+                  Line to burn in
+                  <textarea
+                    value={clip.captionText}
+                    maxLength={500}
+                    onChange={(event) => {
+                      const captionText = event.target.value;
+                      setView((current) => current && ({
+                        ...current,
+                        clips: current.clips.map((item) => item.id === clip.id ? { ...item, captionText } : item),
+                      }));
+                    }}
+                    onBlur={(event) => void patch({ captionText: event.target.value, cues: [] })}
+                  />
+                </label>
+              )}
+              {view?.project.warning ? <p className="warn">{view.project.warning}</p> : null}
               <div className="actions">
                 <button
                   className="btn copper"

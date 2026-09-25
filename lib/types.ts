@@ -21,6 +21,12 @@ export interface TranscriptWord {
   text: string;
 }
 
+export interface Cue {
+  start: number;
+  end: number;
+  text: string;
+}
+
 export interface Transcript {
   language: string;
   text: string;
@@ -40,6 +46,7 @@ export interface Project {
   stage: string;
   createdAt: string;
   transcript: Transcript | null;
+  warning: string | null;
 }
 
 export interface Clip {
@@ -54,6 +61,7 @@ export interface Clip {
   aspect: Aspect;
   captionStyle: CaptionStyle;
   captionText: string;
+  cues: Cue[];
   status: ClipStatus;
   exportName: string | null;
   error: string | null;

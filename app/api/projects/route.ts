@@ -64,6 +64,7 @@ function createProject(source: Project["source"], label: string, ext: string, st
     stage,
     createdAt: new Date().toISOString(),
     transcript: null,
+    warning: null,
   };
   return saveProject(project);
 }
