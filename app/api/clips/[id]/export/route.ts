@@ -1,5 +1,5 @@
 import { fail, json } from "@/lib/http";
-import { atCapacity } from "@/lib/jobs";
+import { atCapacity, claimed, sourceBusy } from "@/lib/jobs";
 import { beginExport } from "@/lib/pipeline";
 import { getClip, getProject } from "@/lib/store";
 
@@ -15,7 +15,7 @@ export async function POST(
   if (!clip) return fail(new Error("That cut is gone."), 404);
   const project = getProject(clip.projectId);
   if (!project) return fail(new Error("That source is gone."), 404);
-  if (clip.status === "exporting" || project.status === "analyzing") {
+  if (sourceBusy(claimed(project.id))) {
     return fail(new Error("This source is already busy."), 409);
   }
   if (atCapacity()) return fail(new Error("Keel is already working on other sources. Try again in a moment."), 429);

@@ -4,6 +4,35 @@ function round(value: number): number {
   return Math.round(value * 100) / 100;
 }
 
+/** Drop malformed model output instead of saving a cut with impossible times. */
+export function sanitizeDrafts(drafts: HighlightDraft[] | unknown, duration: number): HighlightDraft[] {
+  if (!Array.isArray(drafts) || !Number.isFinite(duration) || duration < 3) return [];
+  const clean: HighlightDraft[] = [];
+  for (const draft of drafts) {
+    if (!draft || typeof draft !== "object") continue;
+    const item = draft as Partial<HighlightDraft>;
+    const start = Number(item.start);
+    const end = Number(item.end);
+    const score = Number(item.score);
+    if (!Number.isFinite(start) || !Number.isFinite(end)) continue;
+    const clampedStart = Math.max(0, Math.min(Math.max(0, duration - 3), start));
+    let clampedEnd = Math.min(duration, Math.max(clampedStart + 3, end));
+    if (clampedEnd - clampedStart > 90) clampedEnd = Math.min(duration, clampedStart + 90);
+    if (!(clampedEnd > clampedStart) || clampedEnd - clampedStart < 3) continue;
+    clean.push({
+      title: String(item.title || "Untitled cut").replace(/\s+/g, " ").trim().slice(0, 80) || "Untitled cut",
+      hook: String(item.hook || "").replace(/\s+/g, " ").trim().slice(0, 140),
+      reason: String(item.reason || "").replace(/\s+/g, " ").trim().slice(0, 240),
+      score: Number.isFinite(score) ? Math.min(1, Math.max(0, score)) : 0.5,
+      start: round(clampedStart),
+      end: round(clampedEnd),
+      captionText: String(item.captionText || "").replace(/\s+/g, " ").trim().slice(0, 280),
+    });
+    if (clean.length >= 6) break;
+  }
+  return clean;
+}
+
 function wordsInside(words: TranscriptWord[], start: number, end: number): TranscriptWord[] {
   return words.filter((word) => word.end > start && word.start < end).sort((a, b) => a.start - b.start);
 }

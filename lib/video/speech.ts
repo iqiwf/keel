@@ -16,10 +16,14 @@ export interface TranscriptCache {
   transcript: Transcript;
 }
 
-export async function transcribeFile(audioPath: string, windows?: TimeWindow[]): Promise<Transcript> {
+export function localModelKey(): string {
+  return `local:${whisperModel()}:${process.env.WHISPER_LANGUAGE || "auto"}`;
+}
+
+export async function transcribeFile(audioPath: string, windows?: TimeWindow[], signal?: AbortSignal): Promise<Transcript> {
   const script = path.join(process.cwd(), "scripts", "transcribe.py");
   const clips = windows?.length ? windows.flatMap((window) => [window.start.toFixed(2), window.end.toFixed(2)]).join(",") : "";
-  const output = await run("python", [script, audioPath, whisperModel(), clips], 20 * 60_000);
+  const output = await run("python", [script, audioPath, whisperModel(), clips], 20 * 60_000, undefined, signal);
   const line = output.split(/\r?\n/).map((item) => item.trim()).filter((item) => item.startsWith("{")).pop();
   if (!line) throw new Error("Transcription returned nothing. Check that faster-whisper can read the soundtrack.");
   const parsed = JSON.parse(line) as Transcript & { timeline?: string };
@@ -27,8 +31,22 @@ export async function transcribeFile(audioPath: string, windows?: TimeWindow[]):
   return {
     language: parsed.language || "und",
     text: parsed.text || "",
-    words: alignWords(Array.isArray(parsed.words) ? parsed.words : [], windows, timeline),
+    words: clampWordsToWindows(alignWords(Array.isArray(parsed.words) ? parsed.words : [], windows, timeline), windows),
   };
+}
+
+/** Drop or trim words that landed outside the window they were spoken in. */
+export function clampWordsToWindows(words: TranscriptWord[], windows?: TimeWindow[]): TranscriptWord[] {
+  const spans = (windows ?? []).filter((window) => window.end > window.start).sort((a, b) => a.start - b.start);
+  if (!spans.length) return words;
+  return words.flatMap((word) => {
+    const window = spans.find((span) => word.start < span.end && word.end > span.start);
+    if (!window) return [];
+    const start = Math.max(window.start, word.start);
+    const end = Math.min(window.end, Math.max(start, word.end));
+    if (end - start < 0.02) return [];
+    return [{ ...word, start: round(start), end: round(end) }];
+  });
 }
 
 /**

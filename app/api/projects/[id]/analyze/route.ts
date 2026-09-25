@@ -1,5 +1,5 @@
 import { fail, json } from "@/lib/http";
-import { atCapacity, claimed } from "@/lib/jobs";
+import { atCapacity, claimed, sourceBusy } from "@/lib/jobs";
 import { beginAnalyze, projectView } from "@/lib/pipeline";
 import { durationSchema } from "@/lib/validation";
 
@@ -14,11 +14,11 @@ export async function POST(
     const { id } = await context.params;
     const view = projectView(id);
     if (!view) return fail(new Error("That source is gone."), 404);
-    if (view.project.duration < 3 || view.project.status === "analyzing") {
+    if (view.project.duration < 3) {
       return fail(new Error("The source must be at least 3 seconds and fully loaded before marking cuts."));
     }
-    if (view.clips.some((clip) => clip.status === "exporting") || claimed(id)) {
-      return fail(new Error("Wait for the print to finish before marking again."), 409);
+    if (sourceBusy(claimed(id))) {
+      return fail(new Error("Wait for the current job to finish before marking again."), 409);
     }
     if (atCapacity()) return fail(new Error("Keel is already working on other sources. Try again in a moment."), 429);
     const body = (await request.json()) as { targetSeconds?: number };

@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { sanitizeDrafts } from "../highlights";
 import type { HighlightDraft, Transcript } from "../types";
 import type { AiProvider, AnalyzeInput } from "./types";
 
@@ -28,10 +29,6 @@ async function openAi(path: string, init: RequestInit): Promise<Response> {
     throw new Error(`The model request failed (${response.status}). ${detail}`);
   }
   return response;
-}
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, value));
 }
 
 export const openAiProvider: AiProvider = {
@@ -94,19 +91,7 @@ export const openAiProvider: AiProvider = {
     };
     const content = json.choices?.[0]?.message?.content || "{}";
     const parsed = JSON.parse(content) as { clips?: HighlightDraft[] };
-    const clips = (parsed.clips ?? []).slice(0, 6).map((clip) => {
-      const start = clamp(Number(clip.start) || 0, 0, Math.max(0, input.duration - 3));
-      const end = clamp(Number(clip.end) || start + input.targetSeconds, start + 3, input.duration);
-      return {
-        title: String(clip.title || "Untitled cut").slice(0, 80),
-        hook: String(clip.hook || "").slice(0, 140),
-        reason: String(clip.reason || "Selected by the model.").slice(0, 240),
-        score: clamp(Number(clip.score) || 0.5, 0, 1),
-        start,
-        end,
-        captionText: String(clip.captionText || clip.hook || "").slice(0, 280),
-      };
-    });
+    const clips = sanitizeDrafts(Array.isArray(parsed.clips) ? parsed.clips : [], input.duration);
     if (!clips.length) throw new Error("The model did not return any clips.");
     return clips;
   },

@@ -1,4 +1,5 @@
 import { once } from "node:events";
+import { freeBytes } from "./video/ffmpeg";
 import fs from "node:fs";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
@@ -100,6 +101,8 @@ export async function writeBounded(file: File, target: string, max: number): Pro
     throw new Error(`Files must be under ${Math.round(max / (1024 * 1024))} MB.`);
   }
   fs.mkdirSync(path.dirname(target), { recursive: true });
+  const free = freeBytes(path.dirname(target));
+  if (free !== null && free < file.size + 32 * 1024 * 1024) throw new Error("Not enough free disk space for that file.");
   const tmp = `${target}.${process.pid}.${randomBytes(4).toString("hex")}.part`;
   const out = fs.createWriteStream(tmp, { flags: "wx", mode: 0o600 });
   const reader = file.stream().getReader();

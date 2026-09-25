@@ -13,17 +13,19 @@ function bin(name: string): string {
   return process.env[`${name.toUpperCase()}_PATH`] || name;
 }
 
-export async function run(command: string, args: string[], timeout = 180_000, cwd?: string): Promise<string> {
+export async function run(command: string, args: string[], timeout = 180_000, cwd?: string, signal?: AbortSignal): Promise<string> {
   try {
     const { stdout, stderr } = await exec(bin(command), args, {
       timeout,
       maxBuffer: 16 * 1024 * 1024,
       windowsHide: true,
       cwd,
+      signal,
       env: { ...process.env, PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1" },
     });
     return `${stdout}\n${stderr}`;
   } catch (error) {
+    if (signal?.aborted) throw new Error(`${command} was stopped.`);
     const failed = error as { stderr?: string; message?: string };
     const detail = (failed.stderr || failed.message || "command failed").slice(0, 600);
     throw new Error(`${command} failed: ${detail}`);
@@ -34,13 +36,13 @@ export async function probeDuration(file: string): Promise<number> {
   return (await probeMedia(file)).duration;
 }
 
-export async function probeMedia(file: string): Promise<{ duration: number; hasVideo: boolean; hasAudio: boolean }> {
+export async function probeMedia(file: string, signal?: AbortSignal): Promise<{ duration: number; hasVideo: boolean; hasAudio: boolean }> {
   const output = await run("ffprobe", [
     "-v", "error",
     "-show_entries", "format=duration:stream=codec_type",
     "-of", "json",
     file,
-  ]);
+  ], 180_000, undefined, signal);
   const start = output.indexOf("{");
   const end = output.lastIndexOf("}");
   if (start < 0 || end < start) throw new Error("Could not read the video.");
@@ -158,9 +160,22 @@ export function rmsOfInt16(buffer: Buffer): number {
 }
 
 /** One-second loudness bins. Streams PCM so a long source never fills the output buffer. */
-export function scanEnergy(source: string): Promise<EnergyBin[]> {
+export function freeBytes(dir: string): number | null {
+  try {
+    const stats = fs.statfsSync(dir);
+    return Number(stats.bavail) * Number(stats.bsize);
+  } catch {
+    return null;
+  }
+}
+
+export function scanEnergy(source: string, signal?: AbortSignal): Promise<EnergyBin[]> {
   const windowBytes = ENERGY_RATE * 2;
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new Error("ffmpeg was stopped."));
+      return;
+    }
     const child = spawn(bin("ffmpeg"), [
       "-nostdin", "-v", "error",
       "-i", source, "-vn", "-ac", "1", "-ar", String(ENERGY_RATE),
@@ -184,16 +199,24 @@ export function scanEnergy(source: string): Promise<EnergyBin[]> {
     child.stderr.on("data", (chunk: Buffer) => {
       if (stderr.length < 600) stderr += chunk.toString();
     });
+    const stop = () => child.kill();
+    signal?.addEventListener("abort", stop, { once: true });
     const timer = setTimeout(() => {
       child.kill();
       reject(new Error("ffmpeg timed out while scanning loudness."));
     }, 10 * 60_000);
     child.on("error", (error) => {
       clearTimeout(timer);
-      reject(error);
+      signal?.removeEventListener("abort", stop);
+      reject(signal?.aborted ? new Error("ffmpeg was stopped.") : error);
     });
     child.on("close", (code) => {
       clearTimeout(timer);
+      signal?.removeEventListener("abort", stop);
+      if (signal?.aborted) {
+        reject(new Error("ffmpeg was stopped."));
+        return;
+      }
       if (code !== 0) {
         reject(new Error(`ffmpeg failed: ${stderr.trim().slice(0, 600) || `exit ${code}`}`));
         return;

@@ -16,7 +16,7 @@ export function selectWindows(bins: EnergyBin[], duration: number, targetSeconds
   const safeDuration = Math.max(3, duration);
   const length = Math.min(Math.max(targetSeconds + 8, 20), 45, safeDuration);
   const slots = safeDuration < 25 * 60 ? 4 : 6;
-  if (!bins.length) return spread(safeDuration, length, Math.min(slots, 3));
+  if (!bins.length) return prepareWindows(spread(safeDuration, length, Math.min(slots, 3)), safeDuration);
   const step = Math.max(2, length / 5);
   const ranked: { start: number; end: number; score: number; peak: number; loud: number }[] = [];
   for (let start = 0; start + 8 < safeDuration; start += step) {
@@ -35,7 +35,8 @@ export function selectWindows(bins: EnergyBin[], duration: number, targetSeconds
     const to = from + band;
     const inBand = ranked.filter((item) => item.start >= from && item.start < to);
     const loudest = inBand.filter((item) => item.loud > 0).sort((a, b) => b.score - a.score)[0];
-    const audible = inBand.filter((item) => item.peak > AUDIBLE).sort((a, b) => b.score - a.score)[0];
+    const floor = noiseFloor(bins);
+    const audible = inBand.filter((item) => item.peak > floor).sort((a, b) => b.score - a.score)[0];
     const best = loudest ?? audible;
     if (!best) continue;
     chosen.push({ start: Math.max(0, best.start - 1), end: Math.min(safeDuration, best.end + 2) });
@@ -51,8 +52,37 @@ export function selectWindows(bins: EnergyBin[], duration: number, targetSeconds
     if (covered() + (end - start) > 6 * 60 || overlaps(chosen, start, end)) continue;
     chosen.push({ start, end });
   }
-  if (!chosen.length) return spread(safeDuration, length, Math.min(slots, 3));
-  return chosen.sort((a, b) => a.start - b.start);
+  if (!chosen.length) {
+    if (!bins.some((bin) => bin.rms > noiseFloor(bins))) return [];
+    return prepareWindows(spread(safeDuration, length, Math.min(slots, 3)), safeDuration);
+  }
+  return prepareWindows(chosen, safeDuration);
+}
+
+/** Clamp windows to the source and merge ones that would transcribe the same audio twice. */
+export function prepareWindows(windows: TimeWindow[], duration: number): TimeWindow[] {
+  const limit = Math.max(0, duration);
+  const sorted = windows
+    .map((window) => ({ start: Math.max(0, window.start), end: Math.min(limit, window.end) }))
+    .filter((window) => window.end - window.start >= 0.5)
+    .sort((a, b) => a.start - b.start || a.end - b.end);
+  const merged: TimeWindow[] = [];
+  for (const window of sorted) {
+    const last = merged[merged.length - 1];
+    if (last && window.start <= last.end + 0.3) last.end = Math.max(last.end, window.end);
+    else merged.push({ start: window.start, end: window.end });
+  }
+  return merged;
+}
+
+export function noiseFloor(bins: EnergyBin[]): number {
+  if (!bins.length) return AUDIBLE;
+  const levels = bins.map((bin) => bin.rms).sort((a, b) => a - b);
+  const quiet = levels[Math.min(levels.length - 1, Math.floor(levels.length * 0.2))] ?? -100;
+  const loudest = levels[levels.length - 1] ?? -100;
+  const absolute = Math.min(AUDIBLE, Math.max(-78, quiet + 12));
+  if (loudest <= -78) return absolute;
+  return Math.min(absolute, loudest - 8);
 }
 
 function overlaps(windows: TimeWindow[], start: number, end: number): boolean {
@@ -61,11 +91,12 @@ function overlaps(windows: TimeWindow[], start: number, end: number): boolean {
 
 /** Group audible seconds so a second distinct passage in one band is not dropped. */
 export function speechRuns(bins: EnergyBin[]): { start: number; end: number; peak: number; loud: number }[] {
+  const floor = noiseFloor(bins);
   const ordered = [...bins].sort((a, b) => a.t - b.t);
   const runs: { start: number; end: number; peak: number; loud: number }[] = [];
   let run: { start: number; end: number; peak: number; loud: number } | null = null;
   for (const bin of ordered) {
-    if (bin.rms <= AUDIBLE) {
+    if (bin.rms <= floor) {
       if (run && bin.t - run.end > 1.5) {
         runs.push(run);
         run = null;

@@ -124,11 +124,16 @@ def main():
                 except OSError:
                     pass
             texts.extend(local_texts)
+            duration = max(0.0, (right - left) / rate)
             for word in local_words:
+                if word["start"] >= duration - 0.02:
+                    continue
+                local_start = min(max(0.0, word["start"]), duration)
+                local_end = min(duration, max(local_start, word["end"]))
                 words.append({
                     "text": word["text"],
-                    "start": round(word["start"] + start, 2),
-                    "end": round(max(word["start"], word["end"]) + start, 2),
+                    "start": round(local_start + start, 2),
+                    "end": round(local_end + start, 2),
                 })
     words.sort(key=lambda word: word["start"])
     sys.stdout.write(json.dumps({

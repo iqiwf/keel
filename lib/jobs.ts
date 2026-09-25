@@ -1,5 +1,6 @@
 const active = new Set<string>();
 const cancelled = new Set<string>();
+const controllers = new Map<string, AbortController>();
 
 /** Production cap. The test runner raises it so parallel tests do not block each other. */
 export const JOB_LIMIT = 2;
@@ -24,14 +25,31 @@ export function claim(projectId: string): boolean {
 
 export function release(projectId: string): void {
   active.delete(projectId);
+  controllers.delete(projectId);
 }
 
 export function claimed(projectId: string): boolean {
   return active.has(projectId);
 }
 
+export function arm(projectId: string): AbortSignal {
+  const controller = new AbortController();
+  controllers.set(projectId, controller);
+  return controller.signal;
+}
+
+export function jobSignal(projectId: string): AbortSignal | undefined {
+  return controllers.get(projectId)?.signal;
+}
+
+/** A crashed process leaves no claim, so a stale "analyzing" status can be retried. */
+export function sourceBusy(isClaimed: boolean): boolean {
+  return isClaimed;
+}
+
 export function requestCancel(projectId: string): void {
   cancelled.add(projectId);
+  controllers.get(projectId)?.abort();
 }
 
 export function forgetCancel(projectId: string): void {

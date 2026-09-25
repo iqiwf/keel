@@ -5,15 +5,16 @@ import path from "node:path";
 import test from "node:test";
 import { clipPatchSchema, parseVideoUrl } from "../lib/validation";
 import { cuesFromWords } from "../lib/captions";
-import { highlightsFromSpeech } from "../lib/highlights";
-import { claim, release, requestCancel, wasCancelled, forgetCancel } from "../lib/jobs";
+import { highlightsFromSpeech, sanitizeDrafts } from "../lib/highlights";
+import { claim, release, requestCancel, wasCancelled, forgetCancel, sourceBusy } from "../lib/jobs";
 import { cutsMatch } from "../lib/pipeline";
 import { probeMedia, rmsOfInt16, scanEnergy } from "../lib/video/ffmpeg";
-import { parseEnergy, selectWindows } from "../lib/video/windows";
+import { parseEnergy, prepareWindows, selectWindows } from "../lib/video/windows";
 import { cropWindow, followSubject, planCrop, previewBox } from "../lib/video/reframe";
-import { alignWords, readTranscript, saveTranscript, transcriptMatches } from "../lib/video/speech";
+import { alignWords, clampWordsToWindows, localModelKey, readTranscript, saveTranscript, transcriptMatches } from "../lib/video/speech";
 import { readTrack, saveTrack, trackMatches } from "../lib/video/subjects";
 import { writeBounded } from "../lib/store";
+import { removeDownloadLeftovers } from "../lib/video/youtube";
 
 process.env.KEEL_MAX_JOBS = "8";
 
@@ -163,6 +164,89 @@ test("a second distinct passage in the same stretch is still covered", () => {
   const windows = selectWindows(bins, 50 * 60, 30);
   assert.ok(windows.some((window) => window.start <= 1600 && window.end >= 1603), JSON.stringify(windows));
   assert.ok(windows.some((window) => window.start <= 1850 && window.end >= 1853), JSON.stringify(windows));
+});
+
+test("overlapping windows are merged and a silent soundtrack is not scanned in full", () => {
+  const merged = prepareWindows([
+    { start: -2, end: 10 },
+    { start: 9.2, end: 20 },
+    { start: 100, end: 101 },
+    { start: 400, end: 500 },
+  ], 120);
+  assert.deepEqual(merged, [
+    { start: 0, end: 20 },
+    { start: 100, end: 101 },
+  ]);
+  const silent = selectWindows([
+    { t: 10, rms: -90 },
+    { t: 400, rms: -88 },
+    { t: 2000, rms: -91 },
+  ], 50 * 60, 30);
+  assert.deepEqual(silent, []);
+  const quietSpeech = selectWindows([
+    { t: 30, rms: -90 },
+    { t: 800, rms: -70 },
+    { t: 801, rms: -68 },
+    { t: 802, rms: -69 },
+    { t: 803, rms: -70 },
+  ], 50 * 60, 30);
+  assert.ok(quietSpeech.some((window) => window.start <= 800 && window.end >= 803), JSON.stringify(quietSpeech));
+});
+
+test("words that spill outside a window are trimmed, and a language change misses the cache", () => {
+  const windows = [{ start: 100, end: 130 }, { start: 500, end: 520 }];
+  const clamped = clampWordsToWindows([
+    { text: "early", start: 1, end: 1.4 },
+    { text: "inside", start: 104, end: 104.4 },
+    { text: "spill", start: 128, end: 140 },
+    { text: "gap", start: 200, end: 201 },
+  ], windows);
+  assert.deepEqual(clamped.map((word) => word.text), ["inside", "spill"]);
+  assert.equal(clamped[1].end, 130);
+  const previous = process.env.WHISPER_LANGUAGE;
+  delete process.env.WHISPER_LANGUAGE;
+  const auto = localModelKey();
+  process.env.WHISPER_LANGUAGE = "id";
+  const indonesian = localModelKey();
+  if (previous === undefined) delete process.env.WHISPER_LANGUAGE;
+  else process.env.WHISPER_LANGUAGE = previous;
+  assert.notEqual(auto, indonesian);
+  assert.match(indonesian, /:id$/);
+});
+
+test("malformed model cuts are dropped and a zero score is kept", () => {
+  const drafts = sanitizeDrafts([
+    { title: "Ok", hook: "", reason: "", score: 0, start: 4, end: 12, captionText: "line" },
+    { title: "Bad", hook: "", reason: "", score: 0.9, start: Number.NaN, end: 8, captionText: "" },
+    { title: "Backwards", hook: "", reason: "", score: 2, start: 20, end: 10, captionText: "" },
+    null,
+  ], 40);
+  assert.equal(drafts.length, 2);
+  assert.equal(drafts[0].score, 0);
+  assert.equal(drafts[0].start, 4);
+  assert.ok(drafts[1].end - drafts[1].start >= 3);
+  assert.ok(drafts[1].score <= 1);
+  assert.deepEqual(sanitizeDrafts("nope", 40), []);
+});
+
+test("a stale analyzing status is not busy once its job is gone", () => {
+  assert.equal(sourceBusy(false), false);
+  assert.equal(sourceBusy(true), true);
+});
+
+test("a failed download does not leave fragments behind", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "keel-yt-"));
+  const output = path.join(root, "prj_demo.mp4");
+  fs.writeFileSync(output, "finished");
+  fs.writeFileSync(path.join(root, "prj_demo.mp4.part"), "partial");
+  fs.writeFileSync(path.join(root, "prj_demo.f137.mp4"), "fragment");
+  fs.writeFileSync(path.join(root, "prj_other.mp4"), "keep");
+  removeDownloadLeftovers(output);
+  assert.equal(fs.existsSync(output), true);
+  assert.equal(fs.existsSync(path.join(root, "prj_demo.mp4.part")), false);
+  assert.equal(fs.existsSync(path.join(root, "prj_demo.f137.mp4")), false);
+  assert.equal(fs.existsSync(path.join(root, "prj_other.mp4")), true);
+  fs.rmSync(root, { recursive: true, force: true });
 });
 
 test("a new shot after a gap is framed immediately instead of panning across the cut", () => {

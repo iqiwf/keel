@@ -56,6 +56,7 @@ export async function detectTrack(
   windows?: { start: number; end: number }[],
   onProgress?: (done: number, total: number) => void,
   shouldStop?: () => boolean,
+  signal?: AbortSignal,
 ): Promise<SubjectTrack> {
   const script = path.join(process.cwd(), "scripts", "detect_subjects.py");
   const ranges = windows?.length ? windows : [{ start: 0, end: 0 }];
@@ -66,10 +67,10 @@ export async function detectTrack(
     if (window.end > window.start) args.push(String(window.start), String(window.end));
     let output = "";
     try {
-      output = await run("python", args, 12 * 60_000);
+      output = await run("python", args, 12 * 60_000, undefined, signal);
     } catch (error) {
-      output = await run("python", args, 12 * 60_000);
-      if (!output.trim()) throw error;
+      if (signal?.aborted || shouldStop?.()) throw error;
+      output = await run("python", args, 12 * 60_000, undefined, signal);
     }
     batches.push(parseSamples(output));
     onProgress?.(index + 1, ranges.length);

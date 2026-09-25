@@ -1,15 +1,16 @@
 import fs from "node:fs";
 import path from "node:path";
 import { getProvider } from "./ai";
-import { dataDir, whisperModel } from "./config";
+import { dataDir } from "./config";
 import { id } from "./ids";
-import { claim, forgetCancel, release, wasCancelled } from "./jobs";
+import { sanitizeDrafts } from "./highlights";
+import { arm, claim, forgetCancel, jobSignal, release, wasCancelled } from "./jobs";
 import { clipsFor, getClip, getProject, masterPath, replaceClips, saveClip, updateProject } from "./store";
 import { cuesFromWords } from "./captions";
 import type { Clip, Cue, Transcript } from "./types";
 import { extractAudio, probeMedia, renderClip, scanEnergy } from "./video/ffmpeg";
 import { planCrop } from "./video/reframe";
-import { alignWords, readTranscript, saveTranscript, transcriptMatches } from "./video/speech";
+import { alignWords, clampWordsToWindows, localModelKey, readTranscript, saveTranscript, transcriptMatches } from "./video/speech";
 import { detectTrack, readTrack, saveTrack, sourceFingerprint, TrackingStopped, trackMatches } from "./video/subjects";
 import { selectWindows, type TimeWindow } from "./video/windows";
 import { downloadYoutube } from "./video/youtube";
@@ -17,6 +18,7 @@ import { downloadYoutube } from "./video/youtube";
 export function beginAnalyze(projectId: string, targetSeconds: number): boolean {
   if (!claim(projectId)) return false;
   forgetCancel(projectId);
+  arm(projectId);
   void analyzeProject(projectId, targetSeconds).finally(() => release(projectId));
   return true;
 }
@@ -88,21 +90,25 @@ export async function analyzeProject(projectId: string, targetSeconds: number): 
     updateProject(projectId, { status: "analyzing", stage: "Checking the picture", progress: 8, error: null, warning: null });
     const provider = getProvider();
     const source = masterPath(project);
-    const media = await probeMedia(source);
+    const signal = jobSignal(projectId);
+    const media = await probeMedia(source, signal);
     if (Math.abs(media.duration - project.duration) > 1) updateProject(projectId, { duration: media.duration });
     const duration = media.duration;
     if (stopped(projectId)) return;
     const fingerprint = sourceFingerprint(source);
     const long = provider.name === "local" && duration >= 8 * 60 && media.hasAudio;
     updateProject(projectId, { stage: long ? "Scanning the soundtrack" : "Reading the soundtrack", progress: long ? 16 : 28 });
-    const windows = long ? selectWindows(await scanEnergy(source), duration, targetSeconds) : undefined;
+    const windows = long ? selectWindows(await scanEnergy(source, signal), duration, targetSeconds) : undefined;
     if (stopped(projectId)) return;
-    updateProject(projectId, { stage: "Reading the soundtrack", progress: windows ? 34 : 40 });
-    const transcript = await transcriptFor(projectId, provider.name, source, audioPath, fingerprint, windows, {
-      title: project.title,
-      duration,
-      targetSeconds,
-    });
+    const quiet = Boolean(windows && !windows.length);
+    updateProject(projectId, { stage: quiet ? "The soundtrack is quiet" : "Reading the soundtrack", progress: windows?.length ? 34 : 40 });
+    const transcript = quiet
+      ? { language: "und", text: "", words: [] }
+      : await transcriptFor(projectId, provider.name, source, audioPath, fingerprint, windows, {
+        title: project.title,
+        duration,
+        targetSeconds,
+      }, signal);
     if (stopped(projectId)) return;
     if (!transcript.words.length && provider.name !== "mock") {
       updateProject(projectId, { warning: "No speech was detected, so these cuts have no captions. You can type a line before printing." });
@@ -110,13 +116,13 @@ export async function analyzeProject(projectId: string, targetSeconds: number): 
     updateProject(projectId, { transcript, stage: "Finding the speaker", progress: 58 });
     let trackWarning: string | null = null;
     try {
-      if (!trackMatches(readTrack(projectId), fingerprint, windows)) {
+      if (!quiet && !trackMatches(readTrack(projectId), fingerprint, windows)) {
         const track = await detectTrack(source, windows, (done, total) => {
           updateProject(projectId, {
             stage: total > 1 ? `Finding the speaker (${done}/${total})` : "Finding the speaker",
             progress: 58 + Math.round((done / Math.max(1, total)) * 16),
           });
-        }, () => wasCancelled(projectId));
+        }, () => wasCancelled(projectId), signal);
         if (stopped(projectId)) return;
         saveTrack(projectId, { ...track, fingerprint });
       }
@@ -133,7 +139,8 @@ export async function analyzeProject(projectId: string, targetSeconds: number): 
     for (const previous of clipsFor(projectId)) {
       if (previous.exportName) fs.rmSync(path.join(dataDir(), "exports", previous.exportName), { force: true });
     }
-    const drafts = await provider.findHighlights({ title: project.title, duration, targetSeconds, audioPath }, transcript);
+    const drafts = sanitizeDrafts(await provider.findHighlights({ title: project.title, duration, targetSeconds, audioPath }, transcript), duration);
+    if (!drafts.length) throw new Error("No cuts could be marked.");
     if (stopped(projectId)) return;
     const now = new Date().toISOString();
     const clips: Clip[] = drafts.map((draft, index) => {
@@ -156,6 +163,10 @@ export async function analyzeProject(projectId: string, targetSeconds: number): 
     const warning = [current?.warning, trackWarning ? `Speaker tracking failed, so the frame stays centered. ${trackWarning}` : null].filter(Boolean).join(" ");
     updateProject(projectId, { status: "ready", stage: clips.some((clip) => clip.cues.length) ? "Cuts are on the bench" : "Cuts are ready, without captions", progress: 100, warning: warning || null });
   } catch (error) {
+    if (wasCancelled(projectId) || (error instanceof Error && /was stopped/i.test(error.message))) {
+      stopped(projectId);
+      return;
+    }
     fail(projectId, error);
   } finally {
     fs.rmSync(audioPath, { force: true });
@@ -170,12 +181,13 @@ async function transcriptFor(
   fingerprint: string,
   windows: TimeWindow[] | undefined,
   input: { title: string; duration: number; targetSeconds: number },
+  signal?: AbortSignal,
 ): Promise<Transcript> {
   const provider = getProvider();
   const model = providerName === "openai"
     ? `openai:${process.env.OPENAI_TRANSCRIBE_MODEL || "whisper-1"}`
     : providerName === "local"
-      ? `local:${whisperModel()}`
+      ? localModelKey()
       : providerName;
   const cached = readTranscript(projectId);
   if (providerName !== "mock" && transcriptMatches(cached, fingerprint, model, windows)) return cached!.transcript;
@@ -187,8 +199,12 @@ async function transcriptFor(
     ...input,
     audioPath: providerName === "openai" ? audioPath : providerName === "local" ? source : undefined,
     windows,
+    signal,
   });
-  const aligned = { ...transcript, words: alignWords(transcript.words, windows, "absolute") };
+  const aligned = {
+    ...transcript,
+    words: clampWordsToWindows(alignWords(transcript.words, windows, "absolute"), windows),
+  };
   if (providerName !== "mock") {
     saveTranscript(projectId, {
       fingerprint,

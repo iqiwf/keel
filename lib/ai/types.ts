@@ -6,6 +6,7 @@ export interface AnalyzeInput {
   targetSeconds: number;
   audioPath?: string;
   windows?: { start: number; end: number }[];
+  signal?: AbortSignal;
 }
 
 export interface AiProvider {
