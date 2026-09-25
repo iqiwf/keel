@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { randomBytes } from "node:crypto";
 import { dataDir } from "./config";
 import type { Clip, Project, StoreData } from "./types";
 
@@ -14,9 +15,7 @@ function read(): StoreData {
   if (!fs.existsSync(target)) return structuredClone(EMPTY);
   try {
     const parsed = JSON.parse(fs.readFileSync(target, "utf8")) as StoreData;
-    if (!Array.isArray(parsed.projects) || !Array.isArray(parsed.clips)) {
-      return structuredClone(EMPTY);
-    }
+    if (!Array.isArray(parsed.projects) || !Array.isArray(parsed.clips)) return structuredClone(EMPTY);
     return parsed;
   } catch {
     return structuredClone(EMPTY);
@@ -27,8 +26,8 @@ function write(data: StoreData): void {
   const dir = dataDir();
   fs.mkdirSync(dir, { recursive: true });
   const target = file();
-  const tmp = `${target}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
+  const tmp = path.join(dir, `store.${process.pid}.${randomBytes(8).toString("hex")}.tmp`);
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2), { mode: 0o600 });
   fs.renameSync(tmp, target);
 }
 
@@ -56,9 +55,7 @@ export function updateProject(id: string, patch: Partial<Project>): Project | nu
 }
 
 export function clipsFor(projectId: string): Clip[] {
-  return read()
-    .clips.filter((clip) => clip.projectId === projectId)
-    .sort((a, b) => b.score - a.score);
+  return read().clips.filter((clip) => clip.projectId === projectId).sort((a, b) => b.score - a.score);
 }
 
 export function getClip(id: string): Clip | null {
