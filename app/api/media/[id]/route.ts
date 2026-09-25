@@ -9,10 +9,7 @@ export const dynamic = "force-dynamic";
 
 const ID = /^(?:prj|clp)_[a-f0-9]{16}$/;
 
-export async function GET(
-  request: Request,
-  context: { params: Promise<{ id: string }> },
-): Promise<Response> {
+export async function GET(request: Request, context: { params: Promise<{ id: string }> }): Promise<Response> {
   const { id } = await context.params;
   if (!ID.test(id)) return fail(new Error("Unknown media."), 404);
   const file = resolve(id);
@@ -53,6 +50,7 @@ function mediaType(file: string): string {
 
 function streamFile(request: Request, file: string): Response {
   const stat = fs.statSync(file);
+  if (!stat.isFile() || stat.size <= 0) return new Response(null, { status: 404 });
   const range = request.headers.get("range");
   const common = {
     "Content-Type": mediaType(file),
@@ -66,11 +64,14 @@ function streamFile(request: Request, file: string): Response {
       headers: { ...common, "Content-Length": String(stat.size) },
     });
   }
-  const match = range.match(/bytes=(\d*)-(\d*)/);
+  const match = range.match(/^bytes=(\d*)-(\d*)$/);
   if (!match) return new Response(null, { status: 416 });
   const start = match[1] ? Number(match[1]) : 0;
-  const end = match[2] ? Number(match[2]) : stat.size - 1;
-  if (start > end || end >= stat.size) return new Response(null, { status: 416 });
+  const requestedEnd = match[2] ? Number(match[2]) : stat.size - 1;
+  const end = match[2] ? requestedEnd : stat.size - 1;
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start || start >= stat.size || end >= stat.size) {
+    return new Response(null, { status: 416, headers: { "Content-Range": `bytes */${stat.size}` } });
+  }
   const node = fs.createReadStream(file, { start, end });
   return new Response(Readable.toWeb(node) as ReadableStream, {
     status: 206,
