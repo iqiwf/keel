@@ -190,6 +190,54 @@ test("a clearly larger second speaker takes over, then holds", () => {
   assert.ok(jump < 250, `pan jumped by ${jump}`);
 });
 
+test("a cut that starts late still moves its crop on the output clock", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "keel-late-"));
+  const source = path.join(root, "src.mp4");
+  const output = path.join(root, "cut.mp4");
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const exec = promisify(execFile);
+  await exec("ffmpeg", [
+    "-y", "-f", "lavfi", "-i", "color=c=black:s=640x360:d=4:r=10",
+    "-f", "lavfi", "-i", "anullsrc=r=48000:cl=mono",
+    "-vf", "drawbox=x=20:y=40:w=80:h=80:color=white:t=fill",
+    "-shortest",
+    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", source,
+  ]);
+  await renderClip({
+    source,
+    output,
+    start: 1.2,
+    end: 2.4,
+    aspect: "9:16",
+    style: "ticker",
+    crop: {
+      width: 160,
+      height: 360,
+      keys: [
+        { t: 0, x: 0, y: 0 },
+        { t: 0.45, x: 400, y: 0 },
+      ],
+    },
+    cues: [{ start: 1.3, end: 1.8, text: "Late line" }],
+  });
+  const early = await brightCount(output, 0.15);
+  const late = await brightCount(output, 0.8);
+  assert.ok(early > 1000, `opening frame lost the subject (${early})`);
+  assert.ok(late < 200, `crop did not move after the start (${late})`);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+async function brightCount(video: string, time: number): Promise<number> {
+  const png = `${video}.${time}.png`;
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const exec = promisify(execFile);
+  await exec("ffmpeg", ["-y", "-ss", String(time), "-i", video, "-frames:v", "1", png]);
+  const { stdout } = await exec("python", ["-c", "import cv2,sys; img=cv2.imread(sys.argv[1],0); print(int((img>200).sum()))", png]);
+  return Number(stdout.trim());
+}
+
 test("caption cues stay inside the cut and keep their spoken times", () => {
   const cues = cuesFromWords([
     { text: "Ini", start: 1.0, end: 1.3 },

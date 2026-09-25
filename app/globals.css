@@ -194,6 +194,11 @@ input:focus, textarea:focus { outline: 2px solid var(--copper); outline-offset: 
   display: block;
   background: #050403;
 }
+.mat video.tracked {
+  position: absolute;
+  max-width: none;
+  object-fit: fill;
+}
 .mat.r-9-16 { aspect-ratio: 9 / 16; height: min(62vh, 640px); }
 .mat.r-1-1 { aspect-ratio: 1 / 1; height: min(52vh, 520px); }
 .mat.r-16-9 { aspect-ratio: 16 / 9; width: min(100%, 760px); }

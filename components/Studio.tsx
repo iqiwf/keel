@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Aspect, CaptionStyle, Clip, Cue, Project } from "@/lib/types";
-import { previewFocus, type SubjectTrack } from "@/lib/video/reframe";
+import { planCrop, type SubjectTrack } from "@/lib/video/reframe";
 
 type View = { project: Project; clips: Clip[]; frame?: SubjectTrack | null };
 
@@ -178,9 +178,12 @@ export function Studio() {
 
   const liveCue = clip?.cues?.find((cue) => playhead >= cue.start - 0.05 && playhead <= cue.end + 0.08);
   const liveText = clip?.exportName ? "" : liveCue?.text || (!clip?.cues?.length ? clip?.captionText : "");
-  const focus = view?.frame && clip && !clip.exportName
-    ? previewFocus(view.frame, playhead || clip.start, clip.aspect)
+  const tracked = view?.frame && clip && !clip.exportName
+    ? planCrop(view.frame, clip.aspect, clip.start, clip.end)
     : null;
+  const trackedKey = tracked?.keys.reduce((chosen, key) => (
+    key.t <= Math.max(0, (playhead || clip!.start) - (clip?.start ?? 0)) ? key : chosen
+  ), tracked.keys[0]);
 
   return (
     <div className="room">
@@ -306,7 +309,13 @@ export function Studio() {
                     src={previewSrc}
                     controls
                     playsInline
-                    style={focus ? { objectPosition: `${focus.x * 100}% ${focus.y * 100}%` } : undefined}
+                    className={tracked && trackedKey && view?.frame ? "tracked" : undefined}
+                    style={tracked && trackedKey && view?.frame ? {
+                      width: `${(view.frame.width / tracked.width) * 100}%`,
+                      height: `${(view.frame.height / tracked.height) * 100}%`,
+                      left: `${(-trackedKey.x / tracked.width) * 100}%`,
+                      top: `${(-trackedKey.y / tracked.height) * 100}%`,
+                    } : undefined}
                     onTimeUpdate={(event) => {
                       setPlayhead(event.currentTarget.currentTime);
                       if (!clip || clip.exportName) return;

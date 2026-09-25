@@ -102,10 +102,11 @@ export async function renderClip(input: {
     });
   }
   const filters: string[] = [];
+  filters.push("setpts=PTS-STARTPTS");
   if (input.crop && input.crop.keys.length && input.crop.width >= 2 && input.crop.height >= 2) {
     writeCropCommands(commandPath, input.crop.keys);
     const first = input.crop.keys[0];
-    filters.push(`sendcmd=f=${commandName}`, `crop=${input.crop.width}:${input.crop.height}:${first.x}:${first.y}`);
+    filters.push(`crop=${input.crop.width}:${input.crop.height}:${first.x}:${first.y}`, `sendcmd=f=${commandName}`);
   }
   if (input.crop && input.crop.keys.length) {
     filters.push(
@@ -118,19 +119,15 @@ export async function renderClip(input: {
   }
   if (burned.length && fs.existsSync(captionPath)) filters.push(`ass=${captionName}`);
   const duration = Math.max(0.4, input.end - input.start);
-  const lead = Math.min(input.start, 1);
-  const coarse = Math.max(0, input.start - lead);
   try {
     await run(
       "ffmpeg",
       [
         "-y",
         "-ss",
-        coarse.toFixed(3),
+        input.start.toFixed(3),
         "-i",
         input.source,
-        "-ss",
-        (input.start - coarse).toFixed(3),
         "-t",
         duration.toFixed(3),
         "-map",
@@ -139,6 +136,8 @@ export async function renderClip(input: {
         "0:a:0?",
         "-vf",
         filters.join(","),
+        "-af",
+        "asetpts=PTS-STARTPTS",
         "-c:v",
         "libx264",
         "-preset",
