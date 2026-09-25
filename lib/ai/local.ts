@@ -6,7 +6,7 @@ export const localProvider: AiProvider = {
   async transcribe(input) {
     if (!input.audioPath) throw new Error("Transcription needs an audio file.");
     const { transcribeFile } = await import("../video/speech");
-    return transcribeFile(input.audioPath);
+    return transcribeFile(input.audioPath, input.windows);
   },
   async findHighlights(input, transcript) {
     const clips = highlightsFromSpeech(input.duration, input.targetSeconds, transcript);

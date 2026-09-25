@@ -22,22 +22,24 @@ def main():
         model = WhisperModel(model_name, device="cpu", compute_type="int8", local_files_only=True)
     except Exception:
         model = WhisperModel(model_name, device="cpu", compute_type="int8", local_files_only=False)
+    clips = None
+    if len(sys.argv) > 3 and sys.argv[3]:
+        clips = [float(part) for part in sys.argv[3].split(",") if part]
+        if len(clips) < 2:
+            clips = None
+    options = {
+        "word_timestamps": True,
+        "language": language,
+        "beam_size": 5,
+        "vad_filter": True,
+    }
+    if clips:
+        options["clip_timestamps"] = clips
     try:
-        segments, info = model.transcribe(
-            sys.argv[1],
-            word_timestamps=True,
-            vad_filter=True,
-            language=language,
-            beam_size=5,
-        )
+        segments, info = model.transcribe(sys.argv[1], **options)
     except Exception:
-        segments, info = model.transcribe(
-            sys.argv[1],
-            word_timestamps=True,
-            vad_filter=False,
-            language=language,
-            beam_size=5,
-        )
+        options["vad_filter"] = False
+        segments, info = model.transcribe(sys.argv[1], **options)
     words = []
     texts = []
     for segment in segments:

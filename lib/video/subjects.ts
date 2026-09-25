@@ -27,20 +27,34 @@ export function saveTrack(projectId: string, track: SubjectTrack): void {
   fs.writeFileSync(file, JSON.stringify(track));
 }
 
-export async function detectTrack(source: string): Promise<SubjectTrack> {
+export async function detectTrack(source: string, windows?: { start: number; end: number }[]): Promise<SubjectTrack> {
   const script = path.join(process.cwd(), "scripts", "detect_subjects.py");
-  const output = await run("python", [script, source], 12 * 60_000);
+  const ranges = windows?.length ? windows : [{ start: 0, end: 0 }];
+  const batches = await Promise.all(ranges.map(async (window) => {
+    const args = [script, source];
+    if (window.end > window.start) args.push(String(window.start), String(window.end));
+    const output = await run("python", args, 12 * 60_000);
+    return parseSamples(output);
+  }));
+  const width = batches.find((batch) => batch.width > 1)?.width ?? 0;
+  const height = batches.find((batch) => batch.height > 1)?.height ?? 0;
+  const samples = batches.flatMap((batch) => batch.samples).sort((a, b) => a.t - b.t);
+  if (width < 2 || height < 2) throw new Error("Could not read the picture size for reframing.");
+  return {
+    width,
+    height,
+    face: faceStats(samples),
+    points: followSubject(samples, width, height),
+    coverage: windows?.filter((window) => window.end > window.start),
+  };
+}
+
+function parseSamples(output: string): { width: number; height: number; samples: DetectSample[] } {
   const line = output.split(/\r?\n/).map((item) => item.trim()).filter((item) => item.startsWith("{")).pop();
   if (!line) throw new Error("Speaker tracking returned nothing.");
   const parsed = JSON.parse(line) as { width: number; height: number; samples: DetectSample[] };
   const width = Number(parsed.width) || 0;
   const height = Number(parsed.height) || 0;
   if (width < 2 || height < 2) throw new Error("Could not read the picture size for reframing.");
-  const samples = Array.isArray(parsed.samples) ? parsed.samples : [];
-  return {
-    width,
-    height,
-    face: faceStats(samples),
-    points: followSubject(samples, width, height),
-  };
+  return { width, height, samples: Array.isArray(parsed.samples) ? parsed.samples : [] };
 }

@@ -124,3 +124,11 @@ export async function extractAudio(source: string, output: string): Promise<void
   fs.mkdirSync(path.dirname(output), { recursive: true });
   await run("ffmpeg", ["-y", "-i", source, "-vn", "-ac", "1", "-ar", "16000", "-b:a", "64k", output]);
 }
+
+export async function scanEnergy(source: string): Promise<string> {
+  return run("ffmpeg", [
+    "-i", source, "-vn", "-ac", "1", "-ar", "16000",
+    "-af", "asetnsamples=n=16000:p=0,astats=metadata=1:reset=1,ametadata=print:key=lavfi.astats.Overall.RMS_level:file=-",
+    "-f", "null", "-",
+  ], 10 * 60_000);
+}

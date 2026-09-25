@@ -24,6 +24,7 @@ export interface SubjectTrack {
   height: number;
   face: { width: number; height: number } | null;
   points: SubjectPoint[];
+  coverage?: { start: number; end: number }[];
 }
 
 export interface CropKey {

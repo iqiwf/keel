@@ -3,6 +3,7 @@ import test from "node:test";
 import { clipPatchSchema, parseVideoUrl } from "../lib/validation";
 import { cuesFromWords } from "../lib/captions";
 import { highlightsFromSpeech } from "../lib/highlights";
+import { parseEnergy, selectWindows } from "../lib/video/windows";
 import { cropWindow, followSubject, planCrop } from "../lib/video/reframe";
 
 test("clip patch rejects non-finite numbers and invalid cue timing", () => {
@@ -58,6 +59,23 @@ test("a lost face holds its last position instead of jumping to distant motion",
   ];
   const points = followSubject(samples, 1280, 720);
   assert.ok(points[2].x < 300, `jumped to ${points[2].x}`);
+});
+
+test("long-video windows stay on the loud parts and cover far less than the runtime", () => {
+  const bins = [
+    { t: 10, rms: -80 },
+    { t: 70, rms: -18 },
+    { t: 71, rms: -16 },
+    { t: 200, rms: -90 },
+    { t: 2400, rms: -17 },
+  ];
+  const windows = selectWindows(bins, 50 * 60, 30);
+  const covered = windows.reduce((sum, window) => sum + (window.end - window.start), 0);
+  assert.ok(covered < 8 * 60, `covered ${covered}`);
+  assert.ok(windows.some((window) => window.start <= 70 && window.end >= 72));
+  assert.ok(windows.some((window) => window.start <= 2400 && window.end >= 2401));
+  assert.ok(windows[windows.length - 1].start > 20 * 60);
+  assert.equal(parseEnergy("pts_time:3\nlavfi.astats.Overall.RMS_level=-12.5").length, 1);
 });
 
 test("reframe plan stays on the source bounds for a moving subject", () => {

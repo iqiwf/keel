@@ -6,9 +6,10 @@ import { id } from "./ids";
 import { clipsFor, getClip, getProject, masterPath, replaceClips, saveClip, updateProject } from "./store";
 import { cuesFromWords } from "./captions";
 import type { Clip } from "./types";
-import { extractAudio, probeDuration, renderClip } from "./video/ffmpeg";
+import { extractAudio, probeDuration, renderClip, scanEnergy } from "./video/ffmpeg";
 import { planCrop } from "./video/reframe";
 import { detectTrack, readTrack, saveTrack } from "./video/subjects";
+import { parseEnergy, selectWindows } from "./video/windows";
 import { downloadYoutube } from "./video/youtube";
 
 export async function ingestUpload(projectId: string): Promise<void> {
@@ -38,17 +39,22 @@ export async function analyzeProject(projectId: string, targetSeconds: number): 
   if (project.status === "analyzing" && project.stage.startsWith("Reading")) return;
   const audioPath = path.join(dataDir(), "tmp", `${projectId}.mp3`);
   try {
-    updateProject(projectId, { status: "analyzing", stage: "Reading the soundtrack", progress: 18, error: null, warning: null });
+    updateProject(projectId, { status: "analyzing", stage: "Scanning the soundtrack", progress: 12, error: null, warning: null });
     const provider = getProvider();
+    const source = masterPath(project);
+    const long = provider.name === "local" && project.duration >= 8 * 60;
+    const windows = long ? selectWindows(parseEnergy(await scanEnergy(source)), project.duration, targetSeconds) : undefined;
+    updateProject(projectId, { stage: "Reading the soundtrack", progress: 28 });
     if (provider.name !== "mock") {
       fs.mkdirSync(path.dirname(audioPath), { recursive: true });
-      await extractAudio(masterPath(project), audioPath);
+      await extractAudio(source, audioPath);
     }
     const transcript = await provider.transcribe({
       title: project.title,
       duration: project.duration,
       targetSeconds,
       audioPath: provider.name === "mock" ? undefined : audioPath,
+      windows,
     });
     if (!transcript.words.length && provider.name !== "mock") {
       updateProject(projectId, { warning: "No speech was detected, so these cuts have no captions. You can type a line before printing." });
@@ -56,7 +62,9 @@ export async function analyzeProject(projectId: string, targetSeconds: number): 
     updateProject(projectId, { transcript, stage: "Finding the speaker", progress: 58 });
     let trackWarning: string | null = null;
     try {
-      if (!readTrack(projectId)) saveTrack(projectId, await detectTrack(masterPath(project)));
+      const cached = readTrack(projectId);
+      const same = !windows || covers(cached?.coverage, windows);
+      if (!cached || !same) saveTrack(projectId, await detectTrack(source, windows));
     } catch (error) {
       trackWarning = error instanceof Error ? error.message : "Speaker tracking failed.";
       console.error("speaker tracking failed", trackWarning);
@@ -125,6 +133,11 @@ export function projectView(projectId: string) {
   const project = getProject(projectId);
   if (!project) return null;
   return { project, clips: clipsFor(projectId), frame: readTrack(projectId) };
+}
+
+function covers(saved: { start: number; end: number }[] | undefined, wanted: { start: number; end: number }[]): boolean {
+  if (!saved || saved.length !== wanted.length) return false;
+  return wanted.every((window, index) => Math.abs(saved[index].start - window.start) < 0.2 && Math.abs(saved[index].end - window.end) < 0.2);
 }
 
 function fail(projectId: string, error: unknown): void {

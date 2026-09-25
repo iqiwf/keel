@@ -5,6 +5,7 @@ export interface AnalyzeInput {
   duration: number;
   targetSeconds: number;
   audioPath?: string;
+  windows?: { start: number; end: number }[];
 }
 
 export interface AiProvider {

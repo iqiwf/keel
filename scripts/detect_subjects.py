@@ -46,19 +46,31 @@ def main():
     fps = float(cap.get(cv2.CAP_PROP_FPS) or 25) or 25
     frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
     duration = frames / fps if frames > 0 else 0
-    step = max(1, int(round(fps / (4 if duration <= 15 * 60 else 2))))
+    start = float(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2] else 0
+    end = float(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3] else duration
+    if end <= start:
+        end = duration
+    span = max(0.1, end - start)
+    rate = 4 if span <= 90 else 2
+    step = max(1, int(round(fps / rate)))
+    start_frame = max(0, int(start * fps))
+    end_frame = int(end * fps) if end > 0 else frames
+    if end_frame <= start_frame:
+        end_frame = 10**12
+    if start_frame:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
     root = cv2.data.haarcascades
     frontal = cv2.CascadeClassifier(root + "haarcascade_frontalface_default.xml")
     profile = cv2.CascadeClassifier(root + "haarcascade_profileface.xml")
     minimum = max(24, width // 48)
     samples = []
     previous = None
-    index = 0
-    while True:
+    index = start_frame
+    while index < end_frame:
         ok, frame = cap.read()
         if not ok:
             break
-        if index % step == 0:
+        if (index - start_frame) % step == 0:
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             faces = boxes(frontal, gray, minimum) + boxes(profile, gray, minimum)
             small = cv2.resize(gray, (160, 90))
