@@ -22,11 +22,18 @@ export async function PATCH(
     if (end - start < 3) return fail(new Error("A cut needs at least 3 seconds."));
     if (end - start > 90) return fail(new Error("Keep a cut under 90 seconds."));
     if (end > project.duration + 0.05) return fail(new Error("That out point is past the end of the source."));
+    const cues = patch.cues?.map((cue) => ({
+      ...cue,
+      start: Math.max(start, Math.min(end, cue.start)),
+      end: Math.max(start, Math.min(end, cue.end)),
+    })).filter((cue) => cue.end > cue.start && cue.text.trim()) ?? clip.cues;
     const next = saveClip({
       ...clip,
       ...patch,
       start,
       end: Math.min(end, project.duration),
+      cues,
+      captionText: patch.cues ? cues.map((cue) => cue.text).join(" ") : (patch.captionText ?? clip.captionText),
       status: clip.exportName ? "ready" : clip.status === "failed" ? "ready" : clip.status,
       exportName: null,
       error: null,
