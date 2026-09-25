@@ -17,9 +17,12 @@ export function trackPath(projectId: string): string {
   return path.join(dataDir(), "analysis", `${projectId}.json`);
 }
 
+/** Bump when framing or detection changes so an old track is not reused. */
+export const TRACK_CACHE_VERSION = "2";
+
 export function sourceFingerprint(file: string): string {
   const stat = fs.statSync(file);
-  return `${stat.size}:${Math.round(stat.mtimeMs)}`;
+  return `${stat.size}:${Math.round(stat.mtimeMs)}:t${TRACK_CACHE_VERSION}`;
 }
 
 export function readTrack(projectId: string): SubjectTrack | null {

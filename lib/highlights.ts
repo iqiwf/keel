@@ -14,16 +14,18 @@ export function sanitizeDrafts(drafts: HighlightDraft[] | unknown, duration: num
     const start = Number(item.start);
     const end = Number(item.end);
     const score = Number(item.score);
-    if (!Number.isFinite(start) || !Number.isFinite(end)) continue;
+    if (!Number.isFinite(start) || !Number.isFinite(end) || !(end > start)) continue;
+    if (!Number.isFinite(score)) continue;
     const clampedStart = Math.max(0, Math.min(Math.max(0, duration - 3), start));
     let clampedEnd = Math.min(duration, Math.max(clampedStart + 3, end));
+    if (!(clampedEnd > clampedStart)) continue;
     if (clampedEnd - clampedStart > 90) clampedEnd = Math.min(duration, clampedStart + 90);
-    if (!(clampedEnd > clampedStart) || clampedEnd - clampedStart < 3) continue;
+    if (clampedEnd - clampedStart < 3) continue;
     clean.push({
       title: String(item.title || "Untitled cut").replace(/\s+/g, " ").trim().slice(0, 80) || "Untitled cut",
       hook: String(item.hook || "").replace(/\s+/g, " ").trim().slice(0, 140),
       reason: String(item.reason || "").replace(/\s+/g, " ").trim().slice(0, 240),
-      score: Number.isFinite(score) ? Math.min(1, Math.max(0, score)) : 0.5,
+      score: Math.min(1, Math.max(0, score)),
       start: round(clampedStart),
       end: round(clampedEnd),
       captionText: String(item.captionText || "").replace(/\s+/g, " ").trim().slice(0, 280),

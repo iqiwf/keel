@@ -11,11 +11,13 @@ export async function PATCH(
 ): Promise<Response> {
   try {
     const { id } = await context.params;
+    if (!getClip(id)) return fail(new Error("That cut is gone."), 404);
+    const patch = clipPatchSchema.parse(await request.json());
     const clip = getClip(id);
     if (!clip) return fail(new Error("That cut is gone."), 404);
+    if (clip.status === "exporting") return fail(new Error("This cut is printing. Wait for it to finish."), 409);
     const project = getProject(clip.projectId);
     if (!project) return fail(new Error("That source is gone."), 404);
-    const patch = clipPatchSchema.parse(await request.json());
     const start = patch.start ?? clip.start;
     const end = patch.end ?? clip.end;
     if (end <= start) return fail(new Error("The out point has to land after the in point."));

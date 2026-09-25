@@ -4,7 +4,8 @@ import { getProvider } from "./ai";
 import { dataDir } from "./config";
 import { id } from "./ids";
 import { sanitizeDrafts } from "./highlights";
-import { arm, claim, forgetCancel, jobSignal, release, wasCancelled } from "./jobs";
+import { arm, claim, claimed, forgetCancel, jobSignal, release, wasCancelled } from "./jobs";
+import { WHISPER_CACHE_VERSION } from "./video/speech";
 import { clipsFor, getClip, getProject, masterPath, replaceClips, saveClip, updateProject } from "./store";
 import { cuesFromWords } from "./captions";
 import type { Clip, Cue, Transcript } from "./types";
@@ -20,6 +21,14 @@ export function beginAnalyze(projectId: string, targetSeconds: number): boolean 
   forgetCancel(projectId);
   arm(projectId);
   void analyzeProject(projectId, targetSeconds).finally(() => release(projectId));
+  return true;
+}
+
+export function beginIngest(projectId: string, pageUrl: string): boolean {
+  if (!claim(projectId)) return false;
+  forgetCancel(projectId);
+  arm(projectId);
+  void ingestUrl(projectId, pageUrl).finally(() => release(projectId));
   return true;
 }
 
@@ -68,8 +77,14 @@ export async function ingestUrl(projectId: string, pageUrl: string): Promise<voi
   try {
     updateProject(projectId, { stage: "Fetching the source", progress: 15, status: "analyzing" });
     const file = path.join(path.dirname(masterPath(project)), project.fileName);
-    const title = await downloadYoutube(pageUrl, file);
-    const media = await probeMedia(file);
+    const signal = jobSignal(projectId);
+    if (wasCancelled(projectId)) {
+      stopped(projectId);
+      return;
+    }
+    const title = await downloadYoutube(pageUrl, file, signal);
+    if (stopped(projectId)) return;
+    const media = await probeMedia(file, signal);
     updateProject(projectId, {
       title: title || project.title,
       duration: media.duration,
@@ -79,7 +94,30 @@ export async function ingestUrl(projectId: string, pageUrl: string): Promise<voi
       error: null,
       warning: media.hasAudio ? null : "No soundtrack was found, so the cuts will have no captions.",
     });
-  } catch (error) { fail(projectId, error); }
+  } catch (error) {
+    if (wasCancelled(projectId) || (error instanceof Error && /was stopped/i.test(error.message))) {
+      stopped(projectId);
+      return;
+    }
+    fail(projectId, error);
+  }
+}
+
+export function releaseStuck(projectId: string): void {
+  forgetCancel(projectId);
+  const project = getProject(projectId);
+  if (!project) return;
+  const ready = project.duration >= 3;
+  updateProject(projectId, {
+    status: ready ? "draft" : "failed",
+    stage: ready ? "Ready to mark" : "Stopped",
+    progress: 100,
+    error: ready ? null : "The fetch did not finish.",
+    warning: ready ? "The previous job was cleared." : null,
+  });
+  for (const clip of clipsFor(projectId)) {
+    if (clip.status === "exporting") saveClip({ ...clip, status: "ready", error: null });
+  }
 }
 
 export async function analyzeProject(projectId: string, targetSeconds: number): Promise<void> {
@@ -185,7 +223,7 @@ async function transcriptFor(
 ): Promise<Transcript> {
   const provider = getProvider();
   const model = providerName === "openai"
-    ? `openai:${process.env.OPENAI_TRANSCRIBE_MODEL || "whisper-1"}`
+    ? `openai:${process.env.OPENAI_TRANSCRIBE_MODEL || "whisper-1"}:${WHISPER_CACHE_VERSION}`
     : providerName === "local"
       ? localModelKey()
       : providerName;
@@ -264,13 +302,20 @@ export function projectView(projectId: string) {
   const frame = readTrack(projectId);
   const file = masterPath(project);
   const live = fs.existsSync(file) ? sourceFingerprint(file) : "";
-  return { project, clips: clipsFor(projectId), frame: frame?.fingerprint === live ? frame : null };
+  return { project, clips: clipsFor(projectId), frame: frame?.fingerprint === live ? frame : null, live: claimed(projectId) };
 }
 
 function stopped(projectId: string): boolean {
   if (!wasCancelled(projectId)) return false;
   forgetCancel(projectId);
-  updateProject(projectId, { status: "draft", stage: "Ready to mark", progress: 100, error: null, warning: "Marking was stopped." });
+  const ready = (getProject(projectId)?.duration ?? 0) >= 3;
+  updateProject(projectId, {
+    status: ready ? "draft" : "failed",
+    stage: ready ? "Ready to mark" : "Stopped",
+    progress: 100,
+    error: null,
+    warning: ready ? "Marking was stopped." : "The fetch was stopped.",
+  });
   return true;
 }
 

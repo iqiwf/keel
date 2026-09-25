@@ -16,8 +16,11 @@ export interface TranscriptCache {
   transcript: Transcript;
 }
 
+/** Bump when the timestamp or window algorithm changes so old transcripts are not reused. */
+export const WHISPER_CACHE_VERSION = "2";
+
 export function localModelKey(): string {
-  return `local:${whisperModel()}:${process.env.WHISPER_LANGUAGE || "auto"}`;
+  return `local:${whisperModel()}:${process.env.WHISPER_LANGUAGE || "auto"}:${WHISPER_CACHE_VERSION}`;
 }
 
 export async function transcribeFile(audioPath: string, windows?: TimeWindow[], signal?: AbortSignal): Promise<Transcript> {

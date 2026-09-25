@@ -73,6 +73,17 @@ export function saveClip(clip: Clip): Clip {
   return clip;
 }
 
+/** Merge onto the clip as it is now, so a stale copy cannot wipe a newer edit. */
+export function patchClip(id: string, patch: Partial<Clip>): Clip | null {
+  const data = read();
+  const index = data.clips.findIndex((item) => item.id === id);
+  if (index < 0) return null;
+  const next = { ...data.clips[index], ...patch, id };
+  data.clips[index] = next;
+  write(data);
+  return next;
+}
+
 export function replaceClips(projectId: string, clips: Clip[]): void {
   const data = read();
   data.clips = data.clips.filter((clip) => clip.projectId !== projectId).concat(clips);

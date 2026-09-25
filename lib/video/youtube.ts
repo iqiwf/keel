@@ -22,7 +22,11 @@ export function removeDownloadLeftovers(output: string): void {
   }
 }
 
-export async function downloadYoutube(pageUrl: string, output: string): Promise<string> {
+export function withinDownloadCap(bytes: number): boolean {
+  return Number.isFinite(bytes) && bytes >= 0 && bytes <= downloadCapMb() * 1024 * 1024;
+}
+
+export async function downloadYoutube(pageUrl: string, output: string, signal?: AbortSignal): Promise<string> {
   const free = freeBytes(path.dirname(output));
   if (free !== null && free < 512 * 1024 * 1024) throw new Error("Not enough free disk space to fetch that video.");
   let printed = "";
@@ -49,6 +53,8 @@ export async function downloadYoutube(pageUrl: string, output: string): Promise<
         pageUrl,
       ],
       300_000,
+      undefined,
+      signal,
     );
   } catch (error) {
     removeDownloadLeftovers(output);
@@ -65,6 +71,10 @@ export async function downloadYoutube(pageUrl: string, output: string): Promise<
     fs.renameSync(from, output);
   }
   removeDownloadLeftovers(output);
+  if (!withinDownloadCap(fs.statSync(output).size)) {
+    fs.rmSync(output, { force: true });
+    throw new Error(`That video is over ${downloadCapMb()} MB.`);
+  }
   const title = printed
     .split(/\r?\n/)
     .map((line) => line.trim())

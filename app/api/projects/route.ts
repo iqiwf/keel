@@ -3,7 +3,7 @@ import { maxUploadBytes } from "@/lib/config";
 import { id } from "@/lib/ids";
 import { json, fail } from "@/lib/http";
 import { atCapacity } from "@/lib/jobs";
-import { ingestUpload, ingestUrl } from "@/lib/pipeline";
+import { beginIngest, ingestUpload } from "@/lib/pipeline";
 import { listProjects, mastersDir, saveProject, updateProject, writeBounded } from "@/lib/store";
 import type { Project } from "@/lib/types";
 import { assertVideoFile, parseVideoUrl, safeBaseName } from "@/lib/validation";
@@ -35,7 +35,15 @@ export async function POST(request: Request): Promise<Response> {
 async function fromUrl(body: unknown): Promise<Response> {
   const url = parseVideoUrl(String((body as { url?: string })?.url ?? ""));
   const project = createProject("url", url.toString(), ".mp4", "Fetching the source");
-  void ingestUrl(project.id, url.toString());
+  if (!beginIngest(project.id, url.toString())) {
+    updateProject(project.id, {
+      status: "failed",
+      error: "Keel is already working on other sources. Try again in a moment.",
+      stage: "Stopped",
+      progress: 100,
+    });
+    return fail(new Error("Keel is already working on other sources. Try again in a moment."), 429);
+  }
   return json({ project }, 202);
 }
 

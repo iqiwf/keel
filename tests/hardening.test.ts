@@ -6,15 +6,15 @@ import test from "node:test";
 import { clipPatchSchema, parseVideoUrl } from "../lib/validation";
 import { cuesFromWords } from "../lib/captions";
 import { highlightsFromSpeech, sanitizeDrafts } from "../lib/highlights";
-import { claim, release, requestCancel, wasCancelled, forgetCancel, sourceBusy } from "../lib/jobs";
+import { canMark, canStop, claim, release, requestCancel, wasCancelled, forgetCancel, sourceBusy } from "../lib/jobs";
 import { cutsMatch } from "../lib/pipeline";
 import { probeMedia, rmsOfInt16, scanEnergy } from "../lib/video/ffmpeg";
 import { parseEnergy, prepareWindows, selectWindows } from "../lib/video/windows";
 import { cropWindow, followSubject, planCrop, previewBox } from "../lib/video/reframe";
 import { alignWords, clampWordsToWindows, localModelKey, readTranscript, saveTranscript, transcriptMatches } from "../lib/video/speech";
 import { readTrack, saveTrack, trackMatches } from "../lib/video/subjects";
-import { writeBounded } from "../lib/store";
-import { removeDownloadLeftovers } from "../lib/video/youtube";
+import { getClip, getProject, patchClip, saveClip, saveProject, updateProject, writeBounded } from "../lib/store";
+import { downloadCapMb, removeDownloadLeftovers, withinDownloadCap } from "../lib/video/youtube";
 
 process.env.KEEL_MAX_JOBS = "8";
 
@@ -211,7 +211,8 @@ test("words that spill outside a window are trimmed, and a language change misse
   if (previous === undefined) delete process.env.WHISPER_LANGUAGE;
   else process.env.WHISPER_LANGUAGE = previous;
   assert.notEqual(auto, indonesian);
-  assert.match(indonesian, /:id$/);
+  assert.match(indonesian, /:id:2$/);
+  assert.match(auto, /:auto:2$/);
 });
 
 test("malformed model cuts are dropped and a zero score is kept", () => {
@@ -221,17 +222,23 @@ test("malformed model cuts are dropped and a zero score is kept", () => {
     { title: "Backwards", hook: "", reason: "", score: 2, start: 20, end: 10, captionText: "" },
     null,
   ], 40);
-  assert.equal(drafts.length, 2);
+  assert.equal(drafts.length, 1);
   assert.equal(drafts[0].score, 0);
   assert.equal(drafts[0].start, 4);
-  assert.ok(drafts[1].end - drafts[1].start >= 3);
-  assert.ok(drafts[1].score <= 1);
+  assert.equal(drafts[0].end, 12);
+  assert.deepEqual(sanitizeDrafts([{ title: "Bad score", hook: "", reason: "", score: Number.NaN, start: 4, end: 12, captionText: "" }], 40), []);
   assert.deepEqual(sanitizeDrafts("nope", 40), []);
 });
 
-test("a stale analyzing status is not busy once its job is gone", () => {
+test("a stale analyzing status can be marked again and still stopped", () => {
   assert.equal(sourceBusy(false), false);
   assert.equal(sourceBusy(true), true);
+  assert.equal(canMark(12, false), true);
+  assert.equal(canMark(12, true), false);
+  assert.equal(canMark(0, false), false);
+  assert.equal(canStop("analyzing", false), true);
+  assert.equal(canStop("draft", false), false);
+  assert.equal(canStop("draft", true), true);
 });
 
 test("a failed download does not leave fragments behind", () => {
@@ -247,6 +254,10 @@ test("a failed download does not leave fragments behind", () => {
   assert.equal(fs.existsSync(path.join(root, "prj_demo.f137.mp4")), false);
   assert.equal(fs.existsSync(path.join(root, "prj_other.mp4")), true);
   fs.rmSync(root, { recursive: true, force: true });
+  const cap = downloadCapMb() * 1024 * 1024;
+  assert.equal(withinDownloadCap(cap), true);
+  assert.equal(withinDownloadCap(cap + 1), false);
+  assert.equal(withinDownloadCap(Number.NaN), false);
 });
 
 test("a new shot after a gap is framed immediately instead of panning across the cut", () => {
@@ -405,7 +416,6 @@ test("track and transcript caches ignore a changed source and a corrupt file", a
     });
     assert.equal(transcriptMatches(readTranscript("prj_cache"), "10:1", "local:small", [{ start: 2, end: 6 }]), false);
     assert.equal(fs.readdirSync(path.join(root, "analysis")).some((name) => name.endsWith(".tmp")), false);
-    const { saveProject } = await import("../lib/store");
     saveProject({
       id: "prj_cache",
       title: "Cache",
@@ -421,6 +431,35 @@ test("track and transcript caches ignore a changed source and a corrupt file", a
       transcript: null,
       warning: null,
     });
+    saveClip({
+      id: "clp_cache",
+      projectId: "prj_cache",
+      title: "Old",
+      hook: "",
+      reason: "",
+      score: 0.5,
+      start: 1,
+      end: 6,
+      aspect: "9:16",
+      captionStyle: "ledger",
+      captionText: "old",
+      cues: [],
+      status: "ready",
+      exportName: null,
+      error: null,
+      createdAt: new Date().toISOString(),
+    });
+    const stale = getClip("clp_cache");
+    updateProject("prj_cache", { progress: 40, stage: "Reading" });
+    const merged = patchClip("clp_cache", { title: "Kept" });
+    assert.equal(merged?.title, "Kept");
+    assert.equal(merged?.captionText, "old");
+    assert.equal(getProject("prj_cache")?.progress, 40);
+    assert.equal(getProject("prj_cache")?.stage, "Reading");
+    saveClip({ ...stale!, title: "Stale" });
+    assert.equal(getProject("prj_cache")?.progress, 40);
+    patchClip("clp_cache", { captionText: "newer" });
+    assert.equal(getClip("clp_cache")?.captionText, "newer");
     assert.equal(claim("prj_cache"), true);
     try {
       const analyze = await import("../app/api/projects/[id]/analyze/route");

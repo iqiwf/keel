@@ -2,9 +2,10 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Aspect, CaptionStyle, Clip, Cue, Project } from "@/lib/types";
+import { canMark, canStop } from "@/lib/jobs";
 import { planCrop, previewBox, type SubjectTrack } from "@/lib/video/reframe";
 
-type View = { project: Project; clips: Clip[]; frame?: SubjectTrack | null };
+type View = { project: Project; clips: Clip[]; frame?: SubjectTrack | null; live?: boolean };
 
 const LENGTHS = [15, 30, 45, 60] as const;
 const ASPECTS: Aspect[] = ["9:16", "1:1", "16:9"];
@@ -61,8 +62,7 @@ export function Studio() {
 
   useEffect(() => {
     if (!view) return;
-    const working = view.project.status === "analyzing" || view.clips.some((item) => item.status === "exporting");
-    if (!working) return;
+    if (!view.live) return;
     const timer = window.setInterval(() => {
       void load(view.project.id);
       void refreshList();
@@ -275,12 +275,12 @@ export function Studio() {
             <button
               className="btn copper"
               type="button"
-              disabled={!view || view.project.duration <= 0 || view.project.status === "analyzing"}
+              disabled={!view || !canMark(view.project.duration, Boolean(view.live))}
               onClick={() => void mark()}
             >
-              Mark cuts
+              {view && !view.live && view.project.status === "analyzing" ? "Mark again" : "Mark cuts"}
             </button>
-            {view?.project.status === "analyzing" && view.project.duration > 0 ? (
+            {view && canStop(view.project.status, Boolean(view.live)) ? (
               <button className="btn ghost" type="button" onClick={() => void stopMark()}>
                 Stop
               </button>
@@ -477,7 +477,7 @@ export function Studio() {
                 <button
                   className="btn copper"
                   type="button"
-                  disabled={clip.status === "exporting"}
+                  disabled={clip.status === "exporting" && Boolean(view?.live)}
                   onClick={() => void printCut()}
                 >
                   {clip.status === "exporting" ? "Printing" : "Print cut"}
